@@ -11,6 +11,8 @@ Balanced security assessment with structured methodology. Thorough coverage with
 
 Systematic testing across the full attack surface. Understand the application before exploiting it.
 
+Initialize a structured coverage ledger early for the main attack surfaces. Keep it updated as testing progresses so the scan ends based on measured coverage instead of intuition.
+
 ## Phase 1: Reconnaissance
 
 **Whitebox (source available)**

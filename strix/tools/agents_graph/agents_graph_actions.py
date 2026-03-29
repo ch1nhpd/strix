@@ -214,13 +214,33 @@ def create_agent(
 
         timeout = None
         scan_mode = "deep"
+        assessment_objective = "discovery"
         interactive = False
+        system_prompt_context: dict[str, Any] = {}
         if parent_agent and hasattr(parent_agent, "llm_config"):
             if hasattr(parent_agent.llm_config, "timeout"):
                 timeout = parent_agent.llm_config.timeout
             if hasattr(parent_agent.llm_config, "scan_mode"):
                 scan_mode = parent_agent.llm_config.scan_mode
+            if hasattr(parent_agent.llm_config, "assessment_objective"):
+                assessment_objective = parent_agent.llm_config.assessment_objective
             interactive = getattr(parent_agent.llm_config, "interactive", False)
+            if hasattr(parent_agent, "llm") and hasattr(parent_agent.llm, "_system_prompt_context"):
+                system_prompt_context = dict(
+                    getattr(parent_agent.llm, "_system_prompt_context", {})
+                )
+
+        inherited_framework_skills: list[str] = []
+        auto_loaded_framework_skills = agent_state.context.get("auto_loaded_framework_skills", [])
+        if isinstance(auto_loaded_framework_skills, list):
+            inherited_framework_skills = [
+                skill for skill in auto_loaded_framework_skills if isinstance(skill, str) and skill
+            ]
+
+        merged_skill_list: list[str] = []
+        for skill in [*inherited_framework_skills, *skill_list]:
+            if skill not in merged_skill_list:
+                merged_skill_list.append(skill)
 
         state = AgentState(
             task=task,
@@ -231,10 +251,12 @@ def create_agent(
         )
 
         llm_config = LLMConfig(
-            skills=skill_list,
+            skills=merged_skill_list,
             timeout=timeout,
             scan_mode=scan_mode,
+            assessment_objective=assessment_objective,
             interactive=interactive,
+            system_prompt_context=system_prompt_context,
         )
 
         agent_config = {
@@ -272,6 +294,9 @@ def create_agent(
                 "status": "running",
                 "parent_id": parent_id,
             },
+            "inherited_skills": inherited_framework_skills,
+            "requested_skills": skill_list,
+            "active_skills": merged_skill_list,
         }
 
 

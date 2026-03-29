@@ -11,6 +11,8 @@ Exhaustive security assessment. Maximum coverage, maximum depth. Finding what ot
 
 Thorough understanding before exploitation. Test every parameter, every endpoint, every edge case. Chain findings for maximum impact.
 
+Before deep testing begins, initialize a structured coverage ledger for the main assets, components, and attack surfaces. Keep it current throughout the run and do not finish until every tracked surface is resolved as covered, blocked, or not applicable.
+
 ## Phase 1: Exhaustive Reconnaissance
 
 **Whitebox (source available)**

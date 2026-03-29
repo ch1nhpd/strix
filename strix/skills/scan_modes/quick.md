@@ -11,6 +11,8 @@ Time-boxed assessment focused on high-impact vulnerabilities. Prioritize breadth
 
 Optimize for fast feedback on critical security issues. Skip exhaustive enumeration in favor of targeted testing on high-value attack surfaces.
 
+Even in quick mode, seed a lightweight coverage ledger for the critical surfaces you intend to assess so high-value areas are not skipped accidentally.
+
 ## Phase 1: Rapid Orientation
 
 **Whitebox (source available)**
