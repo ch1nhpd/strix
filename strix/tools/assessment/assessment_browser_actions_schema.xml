@@ -1,0 +1,65 @@
+<tool name="bootstrap_session_profile_from_browser">
+  <description>Extract reusable cookies, localStorage/sessionStorage tokens, CSRF material, and browser-page auth hints from the active browser tab, then save them as a session profile for later authorization testing.</description>
+  <parameters>
+    <parameter name="name" required="true">
+      <description>Human-readable session profile name such as owner, admin-browser, or tenant-b-user.</description>
+    </parameter>
+    <parameter name="role" required="false">
+      <description>Optional role label to attach to the saved browser-derived session profile.</description>
+    </parameter>
+    <parameter name="tenant" required="false">
+      <description>Optional tenant or account label for later cross-tenant comparisons.</description>
+    </parameter>
+    <parameter name="tab_id" required="false">
+      <description>Optional browser tab identifier. Defaults to the currently active tab.</description>
+    </parameter>
+    <parameter name="base_url" required="false">
+      <description>Optional explicit base URL override. When omitted, the current page origin is used.</description>
+    </parameter>
+    <parameter name="notes" required="false">
+      <description>Optional operator notes to append to the saved session profile.</description>
+    </parameter>
+    <parameter name="allow_anonymous" required="false">
+      <description>Whether to save the profile even if no cookies or auth material are found. Default: false.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="confirm_active_artifact_in_browser">
+  <description>Load a potentially dangerous artifact in the currently launched browser, instrument alert/confirm/prompt and console activity, and confirm whether active client-side execution is actually reachable.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label used for evidence and hypothesis recording.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Logical component label such as focus:file_upload:app.test/uploads/avatar.svg.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Human-readable surface description for the artifact being loaded in-browser.</description>
+    </parameter>
+    <parameter name="url" required="true">
+      <description>Absolute http(s) URL of the artifact to load and inspect in the active browser context.</description>
+    </parameter>
+    <parameter name="viewer_urls" required="false">
+      <description>Optional viewer or workflow URLs to replay before falling back to loading the artifact directly. Use this when the artifact must be rendered inside an application page to prove impact.</description>
+    </parameter>
+    <parameter name="artifact_filename" required="false">
+      <description>Optional artifact filename used to identify matching DOM references on viewer pages, such as avatar.svg or shell.php.jpg.</description>
+    </parameter>
+    <parameter name="expected_console_markers" required="false">
+      <description>Optional console markers expected to appear if the artifact executes, such as custom console.log markers.</description>
+    </parameter>
+    <parameter name="expected_dom_markers" required="false">
+      <description>Optional DOM/content markers that should be searched inside the loaded document or active attributes.</description>
+    </parameter>
+    <parameter name="wait_seconds" required="false">
+      <description>How long to wait after navigation before collecting console and DOM signals. Default: 1.5.</description>
+    </parameter>
+    <parameter name="open_artifact_directly_if_missing" required="false">
+      <description>When true, load the artifact directly if no supplied viewer page references it. Default: true.</description>
+    </parameter>
+    <parameter name="persist_hypothesis" required="false">
+      <description>Whether confirmed browser execution should create a stored XSS hypothesis. Default: true.</description>
+    </parameter>
+  </parameters>
+</tool>

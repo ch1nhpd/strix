@@ -5,6 +5,9 @@ from strix.config.config import resolve_llm_config
 from strix.llm.utils import resolve_strix_model
 
 
+VALID_ASSESSMENT_OBJECTIVES = ["discovery", "remediation"]
+
+
 class LLMConfig:
     def __init__(
         self,
@@ -13,6 +16,7 @@ class LLMConfig:
         skills: list[str] | None = None,
         timeout: int | None = None,
         scan_mode: str = "deep",
+        assessment_objective: str | None = None,
         interactive: bool = False,
         reasoning_effort: str | None = None,
         system_prompt_context: dict[str, Any] | None = None,
@@ -33,6 +37,14 @@ class LLMConfig:
         self.timeout = timeout or int(Config.get("llm_timeout") or "300")
 
         self.scan_mode = scan_mode if scan_mode in ["quick", "standard", "deep"] else "deep"
+        candidate_objective = (
+            assessment_objective or Config.get("strix_assessment_objective") or "discovery"
+        )
+        self.assessment_objective = (
+            candidate_objective
+            if candidate_objective in VALID_ASSESSMENT_OBJECTIVES
+            else "discovery"
+        )
 
         self.interactive = interactive
         self.reasoning_effort = reasoning_effort

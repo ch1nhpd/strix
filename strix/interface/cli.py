@@ -72,9 +72,13 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         "targets": args.targets_info,
         "user_instructions": args.instruction or "",
         "run_name": args.run_name,
+        "assessment_objective": getattr(args, "assessment_objective", "discovery"),
     }
 
-    llm_config = LLMConfig(scan_mode=scan_mode)
+    llm_config = LLMConfig(
+        scan_mode=scan_mode,
+        assessment_objective=getattr(args, "assessment_objective", "discovery"),
+    )
     agent_config = {
         "llm_config": llm_config,
         "max_iterations": 300,

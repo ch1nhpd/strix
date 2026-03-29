@@ -1,0 +1,11 @@
+<tool name="seed_coverage_from_targets">
+  <description>Auto-seed the shared assessment coverage ledger from the current scan targets. This extracts framework and route surfaces from local codebases/repositories and adds baseline runtime coverage for URL/IP targets.</description>
+  <parameters>
+    <parameter name="max_route_items" required="false">
+      <description>Maximum number of auto-extracted route-level coverage items to seed per code target. Default: 40.</description>
+    </parameter>
+    <parameter name="include_runtime_targets" required="false">
+      <description>Whether to add baseline runtime coverage items for URL/IP targets when no source extractor is available. Default: true.</description>
+    </parameter>
+  </parameters>
+</tool>

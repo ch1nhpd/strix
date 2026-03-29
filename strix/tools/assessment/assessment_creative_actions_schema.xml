@@ -1,0 +1,68 @@
+<tool name="synthesize_attack_hypotheses">
+  <description>Synthesize attack hypotheses and attack-chain ideas from runtime inventory, mined surface artifacts, discovered workflows, session profiles, and the current assessment ledger so the agent can hunt beyond checklist coverage.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label to synthesize hypotheses for.</description>
+    </parameter>
+    <parameter name="max_hypotheses" required="false">
+      <description>Maximum number of synthesized hypotheses to return. Default: 12.</description>
+    </parameter>
+    <parameter name="persist" required="false">
+      <description>Whether to persist the synthesized hypotheses into the shared hypothesis ledger. Default: true.</description>
+    </parameter>
+    <parameter name="include_existing_open" required="false">
+      <description>Whether to include hypotheses that already exist as open/in-progress items. Default: false.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="generate_contextual_payloads">
+  <description>Generate context-aware payload variants for a given vulnerability type, including encoded forms and optional callback/OOB URLs, so spraying and validation can go beyond a small static payload list.</description>
+  <parameters>
+    <parameter name="vulnerability_type" required="true">
+      <description>Target vulnerability class such as idor, sqli, xss, ssrf, xxe, rce, ssti, or path_traversal.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Short description of the target surface or sink these payloads will be used against.</description>
+    </parameter>
+    <parameter name="parameter_names" required="false">
+      <description>Optional input parameter names or fields that will receive these payloads.</description>
+    </parameter>
+    <parameter name="callback_urls" required="false">
+      <description>Optional callback/OOB URLs to embed into SSRF or XXE payloads.</description>
+    </parameter>
+    <parameter name="include_encodings" required="false">
+      <description>Whether to produce raw plus encoded variants. Default: true.</description>
+    </parameter>
+    <parameter name="max_variants" required="false">
+      <description>Maximum number of payload variants to return. Default: 24.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="triage_attack_anomalies">
+  <description>Score and triage high-signal anomalies across response variants, including authorization parity, timing oracles, redirect oddities, length drift, semantic exploit markers, and blind/OOB interactions, then record coverage/evidence and optionally a new hypothesis.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the coverage and hypothesis ledger.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Component or subsystem associated with the observations.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Coverage surface being triaged.</description>
+    </parameter>
+    <parameter name="observations" required="true">
+      <description>Observation objects to compare. Include at least name plus any status_code, body_hash, body_length, body_preview, elapsed_ms, location, error, oob_interaction, or callback_protocol fields available.</description>
+    </parameter>
+    <parameter name="baseline_name" required="false">
+      <description>Optional baseline observation name. When omitted, the highest-rank role-like name is used.</description>
+    </parameter>
+    <parameter name="min_score" required="false">
+      <description>Minimum anomaly score required before an observation is considered suspicious. Default: 4.</description>
+    </parameter>
+    <parameter name="persist_hypothesis" required="false">
+      <description>Whether to persist a hypothesis when suspicious anomalies are found. Default: true.</description>
+    </parameter>
+  </parameters>
+</tool>

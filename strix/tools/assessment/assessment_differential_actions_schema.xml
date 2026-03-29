@@ -1,0 +1,38 @@
+<tool name="analyze_differential_access">
+  <description>Execute structured allow-vs-deny, owner-vs-other, and cross-tenant HTTP comparisons, then record coverage, evidence, and hypotheses when denied contexts behave too much like allowed contexts.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the assessment ledger.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Component name for the assessment ledger.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Coverage surface being tested, such as "Order differential access".</description>
+    </parameter>
+    <parameter name="method" required="true">
+      <description>HTTP method for the tested endpoint.</description>
+    </parameter>
+    <parameter name="url" required="true">
+      <description>Absolute URL of the tested endpoint.</description>
+    </parameter>
+    <parameter name="cases" required="true">
+      <description>List of request variants. Each item must include name and method, and should include expected_access=allow/deny/unknown plus role, tenant, ownership, object_ref, compare_to, session_profile/session_profile_id, path or url, and optional headers/cookies/params/body/json_body overrides.</description>
+    </parameter>
+    <parameter name="baseline_case" required="false">
+      <description>Optional baseline case name to compare all other cases against.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request timeout in seconds. Default: 15.</description>
+    </parameter>
+    <parameter name="follow_redirects" required="false">
+      <description>Whether redirects should be followed. Default: false.</description>
+    </parameter>
+    <parameter name="similarity_threshold" required="false">
+      <description>Body-preview similarity threshold for parity detection. Default: 0.98.</description>
+    </parameter>
+    <parameter name="success_statuses" required="false">
+      <description>Optional list of HTTP status codes to treat as successful access.</description>
+    </parameter>
+  </parameters>
+</tool>

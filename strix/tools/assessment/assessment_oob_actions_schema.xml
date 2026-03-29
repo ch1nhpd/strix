@@ -1,0 +1,47 @@
+<tool name="oob_interaction_harness">
+  <description>Prepare and manage an out-of-band callback harness for blind SSRF, XXE, RCE, SQLi, and similar validation workflows. Supports manual callback URLs and optional interactsh-backed polling.</description>
+  <parameters>
+    <parameter name="action" required="true">
+      <description>One of: start, poll, record, list, doctor.</description>
+    </parameter>
+    <parameter name="target" required="false">
+      <description>Logical target label for the assessment ledger. Required for start.</description>
+    </parameter>
+    <parameter name="component" required="false">
+      <description>Component name for the assessment ledger. Required for start.</description>
+    </parameter>
+    <parameter name="surface" required="false">
+      <description>Coverage surface being validated, such as "Avatar fetch SSRF". Required for start.</description>
+    </parameter>
+    <parameter name="vulnerability_type" required="false">
+      <description>Blind vulnerability class, such as ssrf, xxe, rce, or sqli. Default: ssrf.</description>
+    </parameter>
+    <parameter name="labels" required="false">
+      <description>Optional list of logical payload labels. A callback URL is generated for each label.</description>
+    </parameter>
+    <parameter name="callback_base_url" required="false">
+      <description>Manual callback base URL to use instead of interactsh. When set, payloads are generated under this base URL and later observations should be recorded via the record action.</description>
+    </parameter>
+    <parameter name="harness_id" required="false">
+      <description>Existing harness identifier. Required for poll and record actions.</description>
+    </parameter>
+    <parameter name="interactions" required="false">
+      <description>Manual callback observations for the record action. Each item should include label and any available protocol, timestamp, remote_address, or raw event details.</description>
+    </parameter>
+    <parameter name="interactsh_cli_path" required="false">
+      <description>Optional explicit path to interactsh-client if it is not on PATH.</description>
+    </parameter>
+    <parameter name="interactsh_server" required="false">
+      <description>Optional interactsh server override for start and poll actions.</description>
+    </parameter>
+    <parameter name="interactsh_token" required="false">
+      <description>Optional interactsh token when the selected server requires authentication.</description>
+    </parameter>
+    <parameter name="wait_seconds" required="false">
+      <description>How long to wait during interactsh startup or polling. Default: 5.</description>
+    </parameter>
+    <parameter name="poll_interval" required="false">
+      <description>Interactsh polling interval in seconds. Default: 5.</description>
+    </parameter>
+  </parameters>
+</tool>

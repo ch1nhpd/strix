@@ -1,0 +1,35 @@
+<tool name="run_inventory_differential_hunt">
+  <description>Use stored runtime inventory plus saved session profiles to automatically run authorization-oriented differential comparisons across the highest-value runtime endpoints.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label whose stored runtime inventory should be hunted.</description>
+    </parameter>
+    <parameter name="max_endpoints" required="false">
+      <description>Maximum number of runtime endpoint-method combinations to execute in one batch. Default: 10.</description>
+    </parameter>
+    <parameter name="min_priority" required="false">
+      <description>Minimum endpoint priority to include: critical, high, normal, or low. Default: high.</description>
+    </parameter>
+    <parameter name="include_state_changing" required="false">
+      <description>Whether to include POST/PUT/PATCH/DELETE endpoints. Default: false.</description>
+    </parameter>
+    <parameter name="only_unresolved" required="false">
+      <description>When true, skip runtime endpoint coverage items already marked covered or not_applicable. Default: true.</description>
+    </parameter>
+    <parameter name="host_regex" required="false">
+      <description>Optional regex filter applied to runtime inventory hosts.</description>
+    </parameter>
+    <parameter name="path_regex" required="false">
+      <description>Optional regex filter applied to normalized runtime paths.</description>
+    </parameter>
+    <parameter name="profile_names" required="false">
+      <description>Optional list of session profile names to restrict the hunt to a known role/tenant set.</description>
+    </parameter>
+    <parameter name="similarity_threshold" required="false">
+      <description>Body-preview similarity threshold for suspicious parity detection. Default: 0.98.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request timeout in seconds. Default: 15.</description>
+    </parameter>
+  </parameters>
+</tool>

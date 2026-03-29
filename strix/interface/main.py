@@ -356,6 +356,20 @@ Examples:
             "Default: deep."
         ),
     )
+    parser.add_argument(
+        "--objective",
+        "--assessment-objective",
+        dest="assessment_objective",
+        type=str,
+        choices=["discovery", "remediation"],
+        default=Config.get("strix_assessment_objective") or "discovery",
+        help=(
+            "Assessment objective: "
+            "'discovery' to maximize coverage and bug finding before fixes, "
+            "'remediation' to reproduce, patch, and verify known issues. "
+            "Default: discovery."
+        ),
+    )
 
     parser.add_argument(
         "--config",
@@ -547,6 +561,7 @@ def main() -> None:
     posthog.start(
         model=Config.get("strix_llm"),
         scan_mode=args.scan_mode,
+        assessment_objective=args.assessment_objective,
         is_whitebox=is_whitebox,
         interactive=not args.non_interactive,
         has_instructions=bool(args.instruction),

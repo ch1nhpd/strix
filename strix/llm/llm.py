@@ -111,6 +111,9 @@ class LLM:
     def _get_skills_to_load(self) -> list[str]:
         ordered_skills = [*self._active_skills]
         ordered_skills.append(f"scan_modes/{self.config.scan_mode}")
+        ordered_skills.append(
+            f"assessment_objectives/{self.config.assessment_objective}"
+        )
 
         deduped: list[str] = []
         seen: set[str] = set()

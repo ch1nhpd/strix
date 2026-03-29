@@ -1,0 +1,44 @@
+<tool name="discover_workflows_from_requests">
+  <description>Reconstruct multi-step state-changing workflows from captured proxy history so race conditions, replay bugs, skipped-step issues, and business-logic flaws can be hunted systematically.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for storing discovered workflows and seeded coverage.</description>
+    </parameter>
+    <parameter name="max_request_pages" required="false">
+      <description>How many proxy-history pages to inspect. Default: 3.</description>
+    </parameter>
+    <parameter name="page_size" required="false">
+      <description>How many requests to read per page. Default: 50.</description>
+    </parameter>
+    <parameter name="max_request_details" required="false">
+      <description>Maximum number of raw requests to inspect for actor/session fingerprints. Default: 120.</description>
+    </parameter>
+    <parameter name="max_workflows" required="false">
+      <description>Maximum number of workflow candidates to keep and seed. Default: 20.</description>
+    </parameter>
+    <parameter name="max_sequence_length" required="false">
+      <description>Maximum number of consecutive requests to include in one workflow candidate. Default: 4.</description>
+    </parameter>
+    <parameter name="httpql_filter" required="false">
+      <description>Optional HTTPQL filter for narrowing the source traffic.</description>
+    </parameter>
+    <parameter name="scope_id" required="false">
+      <description>Optional Caido scope identifier for limiting the workflow discovery set.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="list_discovered_workflows">
+  <description>List previously reconstructed workflow candidates for the current assessment root.</description>
+  <parameters>
+    <parameter name="target" required="false">
+      <description>Optional target label. When provided, only the matching workflow record is returned.</description>
+    </parameter>
+    <parameter name="include_workflows" required="false">
+      <description>Whether to include the workflow candidate details in the response. Default: true.</description>
+    </parameter>
+    <parameter name="max_items" required="false">
+      <description>Maximum number of workflow records to return. Default: 50.</description>
+    </parameter>
+  </parameters>
+</tool>

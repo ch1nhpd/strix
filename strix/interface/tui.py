@@ -742,11 +742,16 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "targets": args.targets_info,
             "user_instructions": args.instruction or "",
             "run_name": args.run_name,
+            "assessment_objective": getattr(args, "assessment_objective", "discovery"),
         }
 
     def _build_agent_config(self, args: argparse.Namespace) -> dict[str, Any]:
         scan_mode = getattr(args, "scan_mode", "deep")
-        llm_config = LLMConfig(scan_mode=scan_mode, interactive=True)
+        llm_config = LLMConfig(
+            scan_mode=scan_mode,
+            assessment_objective=getattr(args, "assessment_objective", "discovery"),
+            interactive=True,
+        )
 
         config = {
             "llm_config": llm_config,

@@ -83,6 +83,23 @@ def _check_active_agents(agent_state: Any = None) -> dict[str, Any] | None:
     return None
 
 
+def _check_assessment_coverage(agent_state: Any = None) -> dict[str, Any] | None:
+    if agent_state is None:
+        return None
+
+    try:
+        from strix.tools.assessment.assessment_actions import get_finish_blockers
+
+        return get_finish_blockers(agent_state)
+    except ImportError:
+        return None
+    except Exception:
+        import logging
+
+        logging.exception("Error checking assessment coverage")
+        return None
+
+
 @register_tool(sandbox_execution=False)
 def finish_scan(
     executive_summary: str,
@@ -98,6 +115,10 @@ def finish_scan(
     active_agents_error = _check_active_agents(agent_state)
     if active_agents_error:
         return active_agents_error
+
+    assessment_blocker = _check_assessment_coverage(agent_state)
+    if assessment_blocker:
+        return assessment_blocker
 
     validation_errors = []
 

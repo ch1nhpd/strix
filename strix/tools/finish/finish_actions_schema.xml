@@ -14,14 +14,19 @@ This tool directly updates the scan report data:
 - technical_analysis
 - recommendations
 
+IMPORTANT: This tool also checks the structured assessment coverage ledger.
+You cannot finish if no coverage ledger exists or if any coverage items are still unresolved.
+Use bulk_record_coverage / record_coverage / list_assessment_state to manage this.
+
 All fields are REQUIRED and map directly to the final report.
 
 This must be the last tool called in the scan. It will:
 1. Verify you are the root agent
 2. Check all subagents have completed
-3. Update the scan with your provided fields
-4. Mark the scan as completed
-5. Stop agent execution
+3. Verify the structured coverage ledger is complete
+4. Update the scan with your provided fields
+5. Mark the scan as completed
+6. Stop agent execution
 
 Use this tool when:
 - You are the main/root agent conducting the security assessment

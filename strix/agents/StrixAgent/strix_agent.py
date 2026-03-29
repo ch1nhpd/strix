@@ -2,6 +2,10 @@ from typing import Any
 
 from strix.agents.base_agent import BaseAgent
 from strix.llm.config import LLMConfig
+from strix.tools.assessment import (
+    seed_coverage_from_scan_config,
+    summarize_bootstrap_for_prompt,
+)
 
 
 class StrixAgent(BaseAgent):
@@ -53,13 +57,53 @@ class StrixAgent(BaseAgent):
             "scope_source": "system_scan_config",
             "authorization_source": "strix_platform_verified_targets",
             "authorized_targets": authorized_targets,
+            "assessment_objective": scan_config.get("assessment_objective", "discovery"),
             "user_instructions_do_not_expand_scope": True,
         }
+
+    def _remember_loaded_skills(self, skills: list[str], *, auto_loaded: bool = False) -> None:
+        existing = self.state.context.get("loaded_skills", [])
+        if not isinstance(existing, list):
+            existing = []
+
+        merged = sorted(
+            {skill for skill in [*existing, *skills] if isinstance(skill, str) and skill}
+        )
+        if merged:
+            self.state.update_context("loaded_skills", merged)
+        if auto_loaded:
+            self.state.update_context(
+                "auto_loaded_framework_skills",
+                sorted({skill for skill in skills if isinstance(skill, str) and skill}),
+            )
+
+    def _bootstrap_assessment_context(self, scan_config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            bootstrap_result = seed_coverage_from_scan_config(self.state, scan_config)
+            framework_skills = [
+                skill
+                for skill in bootstrap_result.get("framework_skills", [])
+                if isinstance(skill, str) and skill
+            ]
+            if framework_skills:
+                self.llm.add_skills(framework_skills)
+                self._remember_loaded_skills(framework_skills, auto_loaded=True)
+
+            return summarize_bootstrap_for_prompt(bootstrap_result)
+        except Exception as e:  # noqa: BLE001
+            return {
+                "coverage_seeded": 0,
+                "frameworks": [],
+                "framework_skills": [],
+                "error": str(e),
+            }
 
     async def execute_scan(self, scan_config: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912
         user_instructions = scan_config.get("user_instructions", "")
         targets = scan_config.get("targets", [])
-        self.llm.set_system_prompt_context(self._build_system_scope_context(scan_config))
+        prompt_context = self._build_system_scope_context(scan_config)
+        prompt_context["assessment_bootstrap"] = self._bootstrap_assessment_context(scan_config)
+        self.llm.set_system_prompt_context(prompt_context)
 
         repositories = []
         local_code = []

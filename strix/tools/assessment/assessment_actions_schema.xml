@@ -1,0 +1,110 @@
+<tools>
+  <tool name="record_coverage">
+    <description>Record or update an attack-surface coverage item in the shared assessment ledger. Use this to track what has been tested, what remains open, and what is blocked with evidence.</description>
+    <details>The root agent should initialize coverage early for high-value targets/components/surfaces. Repeated calls with the same target/component/surface update the existing record instead of creating duplicates.</details>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>The specific asset, service, or repository area being assessed.</description>
+      </parameter>
+      <parameter name="component" type="string" required="true">
+        <description>The feature, subsystem, route group, or logical component.</description>
+      </parameter>
+      <parameter name="surface" type="string" required="true">
+        <description>The concrete attack surface to cover, e.g. "admin order endpoints", "JWT verification path", "file upload parser".</description>
+      </parameter>
+      <parameter name="status" type="string" required="true">
+        <description>One of: uncovered, in_progress, covered, not_applicable, blocked.</description>
+      </parameter>
+      <parameter name="rationale" type="string" required="true">
+        <description>Why this status is correct right now, including evidence or blocker details.</description>
+      </parameter>
+      <parameter name="priority" type="string" required="false">
+        <description>Priority of this surface: low, normal, high, critical.</description>
+      </parameter>
+      <parameter name="next_step" type="string" required="false">
+        <description>The next concrete action required to move this surface forward.</description>
+      </parameter>
+    </parameters>
+  </tool>
+
+  <tool name="bulk_record_coverage">
+    <description>Create or update multiple coverage items in one call. Prefer this at the start of a scan to seed the ledger with the main attack surfaces.</description>
+    <parameters>
+      <parameter name="items" type="list" required="true">
+        <description>A JSON array of objects. Each object should contain target, component, surface, status, rationale, and optionally priority and next_step.</description>
+      </parameter>
+      <parameter name="preserve_existing_status" type="boolean" required="false">
+        <description>When true, existing coverage items keep their current status, rationale, priority, and next_step instead of being reset by the new seed input. Default: false.</description>
+      </parameter>
+    </parameters>
+  </tool>
+
+  <tool name="record_hypothesis">
+    <description>Track an active security hypothesis so the team can reason systematically instead of relying on transient chat history.</description>
+    <parameters>
+      <parameter name="hypothesis" type="string" required="true">
+        <description>The suspected issue or attack path to validate.</description>
+      </parameter>
+      <parameter name="target" type="string" required="true">
+        <description>The asset or target area this hypothesis applies to.</description>
+      </parameter>
+      <parameter name="component" type="string" required="false">
+        <description>The feature or subsystem relevant to the hypothesis.</description>
+      </parameter>
+      <parameter name="vulnerability_type" type="string" required="false">
+        <description>The vulnerability class, e.g. idor, sqli, ssrf, business_logic.</description>
+      </parameter>
+      <parameter name="status" type="string" required="false">
+        <description>One of: open, in_progress, validated, rejected, blocked.</description>
+      </parameter>
+      <parameter name="priority" type="string" required="false">
+        <description>Priority of the hypothesis: low, normal, high, critical.</description>
+      </parameter>
+      <parameter name="rationale" type="string" required="false">
+        <description>Supporting reasoning, signals, or blocker details.</description>
+      </parameter>
+    </parameters>
+  </tool>
+
+  <tool name="record_evidence">
+    <description>Store durable evidence tied to the assessment ledger. Use this for strong signals, confirmed observations, failed but informative attempts, or payload outcomes worth preserving.</description>
+    <parameters>
+      <parameter name="title" type="string" required="true">
+        <description>A short evidence title.</description>
+      </parameter>
+      <parameter name="details" type="string" required="true">
+        <description>The evidence details, observation, or result.</description>
+      </parameter>
+      <parameter name="source" type="string" required="false">
+        <description>One of: code, runtime, traffic, tool, research, user, other.</description>
+      </parameter>
+      <parameter name="target" type="string" required="false">
+        <description>The asset or target area this evidence belongs to.</description>
+      </parameter>
+      <parameter name="component" type="string" required="false">
+        <description>The feature or subsystem this evidence belongs to.</description>
+      </parameter>
+      <parameter name="related_coverage_id" type="string" required="false">
+        <description>Optional coverage item ID linked to this evidence.</description>
+      </parameter>
+      <parameter name="related_hypothesis_id" type="string" required="false">
+        <description>Optional hypothesis ID linked to this evidence.</description>
+      </parameter>
+    </parameters>
+  </tool>
+
+  <tool name="list_assessment_state">
+    <description>List the current shared assessment ledger, including coverage, hypotheses, evidence, and finish readiness.</description>
+    <parameters>
+      <parameter name="include_resolved_coverage" type="boolean" required="false">
+        <description>When false, only unresolved coverage items are returned.</description>
+      </parameter>
+      <parameter name="include_evidence" type="boolean" required="false">
+        <description>When true, include recent evidence records.</description>
+      </parameter>
+      <parameter name="max_items" type="integer" required="false">
+        <description>Maximum number of coverage, hypothesis, and evidence items to return.</description>
+      </parameter>
+    </parameters>
+  </tool>
+</tools>

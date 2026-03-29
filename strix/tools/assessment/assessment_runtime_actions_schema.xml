@@ -1,0 +1,44 @@
+<tool name="map_runtime_surface">
+  <description>Map the runtime attack surface from captured proxy requests and sitemap entries, normalize dynamic paths, and auto-seed the shared coverage ledger with observed endpoints.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the assessment ledger.</description>
+    </parameter>
+    <parameter name="max_request_pages" required="false">
+      <description>How many request-history pages to inspect from the proxy. Default: 2.</description>
+    </parameter>
+    <parameter name="max_sitemap_pages" required="false">
+      <description>How many sitemap pages to inspect for root domains and descendants. Default: 2.</description>
+    </parameter>
+    <parameter name="page_size" required="false">
+      <description>How many requests to read per proxy page. Default: 50.</description>
+    </parameter>
+    <parameter name="max_seed_items" required="false">
+      <description>Maximum number of normalized endpoints to seed into the coverage ledger. Default: 40.</description>
+    </parameter>
+    <parameter name="sample_request_details" required="false">
+      <description>How many raw request samples to inspect for auth and content-type hints. Default: 12.</description>
+    </parameter>
+    <parameter name="scope_id" required="false">
+      <description>Optional Caido scope identifier to constrain the runtime mapping.</description>
+    </parameter>
+    <parameter name="httpql_filter" required="false">
+      <description>Optional HTTPQL filter for request history narrowing before inventory extraction.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="list_runtime_inventory">
+  <description>List previously mapped runtime inventory records stored for the current root assessment.</description>
+  <parameters>
+    <parameter name="target" required="false">
+      <description>Optional logical target label. When provided, only the matching runtime inventory record is returned.</description>
+    </parameter>
+    <parameter name="include_inventory" required="false">
+      <description>Whether to include the stored normalized inventory items in the response. Default: true.</description>
+    </parameter>
+    <parameter name="max_items" required="false">
+      <description>Maximum number of runtime inventory records to return. Default: 50.</description>
+    </parameter>
+  </parameters>
+</tool>

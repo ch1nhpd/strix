@@ -1,3 +1,4 @@
+from .assessment import *  # noqa: F403
 from .agents_graph import *  # noqa: F403
 from .browser import *  # noqa: F403
 from .executor import (

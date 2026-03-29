@@ -76,6 +76,7 @@ def _base_props() -> dict[str, Any]:
 def start(
     model: str | None,
     scan_mode: str | None,
+    assessment_objective: str | None,
     is_whitebox: bool,
     interactive: bool,
     has_instructions: bool,
@@ -86,6 +87,7 @@ def start(
             **_base_props(),
             "model": model or "unknown",
             "scan_mode": scan_mode or "unknown",
+            "assessment_objective": assessment_objective or "unknown",
             "scan_type": "whitebox" if is_whitebox else "blackbox",
             "interactive": interactive,
             "has_instructions": has_instructions,

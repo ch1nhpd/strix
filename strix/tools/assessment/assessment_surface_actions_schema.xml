@@ -1,0 +1,41 @@
+<tool name="mine_additional_attack_surface">
+  <description>Mine extra attack-surface artifacts from captured proxy traffic and responses, including OpenAPI/Swagger specs, GraphQL endpoints, persisted-query hints, JavaScript-discovered routes, and WebSocket endpoints, then seed them into the coverage ledger.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for storing mined artifacts and seeded coverage.</description>
+    </parameter>
+    <parameter name="max_request_pages" required="false">
+      <description>How many proxy-history pages to inspect. Default: 2.</description>
+    </parameter>
+    <parameter name="page_size" required="false">
+      <description>How many requests to read per page. Default: 50.</description>
+    </parameter>
+    <parameter name="max_response_samples" required="false">
+      <description>Maximum number of request/response pairs to inspect deeply for artifacts. Default: 20.</description>
+    </parameter>
+    <parameter name="max_seed_items" required="false">
+      <description>Maximum number of mined artifacts or documented endpoints to return/seed. Default: 50.</description>
+    </parameter>
+    <parameter name="httpql_filter" required="false">
+      <description>Optional HTTPQL filter for narrowing the source traffic.</description>
+    </parameter>
+    <parameter name="scope_id" required="false">
+      <description>Optional Caido scope identifier for limiting the mined request set.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="list_mined_attack_surface">
+  <description>List previously mined attack-surface artifacts for the current assessment root.</description>
+  <parameters>
+    <parameter name="target" required="false">
+      <description>Optional target label. When provided, only that mined record is returned.</description>
+    </parameter>
+    <parameter name="include_artifacts" required="false">
+      <description>Whether to include the mined artifact details in the response. Default: true.</description>
+    </parameter>
+    <parameter name="max_items" required="false">
+      <description>Maximum number of mined records to return. Default: 50.</description>
+    </parameter>
+  </parameters>
+</tool>

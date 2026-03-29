@@ -1,0 +1,89 @@
+<tool name="save_session_profile">
+  <description>Store a reusable authenticated or role-specific HTTP session profile so later authorization and differential tests can reference it by name instead of repeating headers, cookies, params, and base URLs.</description>
+  <parameters>
+    <parameter name="name" required="true">
+      <description>Human-readable profile name such as "guest", "owner", "admin", or "tenant-b-user".</description>
+    </parameter>
+    <parameter name="headers" required="false">
+      <description>HTTP headers to reuse, such as Authorization or X-CSRF-Token.</description>
+    </parameter>
+    <parameter name="cookies" required="false">
+      <description>Cookie values to reuse for this session.</description>
+    </parameter>
+    <parameter name="params" required="false">
+      <description>Default query parameters to attach for this session, if needed.</description>
+    </parameter>
+    <parameter name="base_url" required="false">
+      <description>Optional absolute base URL. When set, validation tools can accept a path and resolve the full URL from this profile.</description>
+    </parameter>
+    <parameter name="role" required="false">
+      <description>Role label such as guest, user, owner, manager, or admin.</description>
+    </parameter>
+    <parameter name="tenant" required="false">
+      <description>Tenant or account label used to distinguish cross-tenant contexts.</description>
+    </parameter>
+    <parameter name="notes" required="false">
+      <description>Optional notes about how the session was obtained or when it should be used.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="list_session_profiles">
+  <description>List reusable session profiles stored for the current root assessment. Values are redacted by default unless include_values is true.</description>
+  <parameters>
+    <parameter name="include_values" required="false">
+      <description>Whether to include raw header and cookie values in the response. Default: false.</description>
+    </parameter>
+    <parameter name="max_items" required="false">
+      <description>Maximum number of profiles to return. Default: 50.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="extract_session_profiles_from_requests">
+  <description>Extract reusable session material from captured proxy requests, then save deduplicated session profiles for later authorization and differential testing.</description>
+  <parameters>
+    <parameter name="request_ids" required="false">
+      <description>Optional list of specific request IDs to inspect. When omitted, request history is queried using the page/filter settings.</description>
+    </parameter>
+    <parameter name="httpql_filter" required="false">
+      <description>Optional HTTPQL filter for selecting candidate requests from proxy history.</description>
+    </parameter>
+    <parameter name="start_page" required="false">
+      <description>First proxy-history page to inspect when request_ids is omitted. Default: 1.</description>
+    </parameter>
+    <parameter name="end_page" required="false">
+      <description>Last proxy-history page to inspect when request_ids is omitted. Default: 1.</description>
+    </parameter>
+    <parameter name="page_size" required="false">
+      <description>Number of requests per page when reading proxy history. Default: 20.</description>
+    </parameter>
+    <parameter name="name_prefix" required="false">
+      <description>Prefix for generated profile names. Default: traffic.</description>
+    </parameter>
+    <parameter name="include_unauthenticated" required="false">
+      <description>Whether requests without auth/session material should still be turned into session profiles. Default: false.</description>
+    </parameter>
+    <parameter name="default_role" required="false">
+      <description>Optional role label to assign to every extracted session profile.</description>
+    </parameter>
+    <parameter name="default_tenant" required="false">
+      <description>Optional tenant label to assign to every extracted session profile.</description>
+    </parameter>
+    <parameter name="max_profiles" required="false">
+      <description>Maximum number of deduplicated profiles to extract in one call. Default: 20.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="delete_session_profile">
+  <description>Delete a stored session profile by profile_id or name.</description>
+  <parameters>
+    <parameter name="profile_id" required="false">
+      <description>Exact session profile identifier to delete.</description>
+    </parameter>
+    <parameter name="name" required="false">
+      <description>Profile name to delete when the profile_id is not known.</description>
+    </parameter>
+  </parameters>
+</tool>

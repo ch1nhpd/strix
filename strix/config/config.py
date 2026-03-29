@@ -22,6 +22,7 @@ class Config:
     strix_llm_max_retries = "5"
     strix_memory_compressor_timeout = "30"
     llm_timeout = "300"
+    strix_assessment_objective = "discovery"
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
         "llm_api_key",
@@ -33,6 +34,7 @@ class Config:
         "strix_llm_max_retries",
         "strix_memory_compressor_timeout",
         "llm_timeout",
+        "strix_assessment_objective",
     )
 
     # Tool & Feature Configuration

@@ -1,0 +1,197 @@
+<tool name="role_matrix_test">
+  <description>Execute the same HTTP surface across multiple role/session variants and record coverage, evidence, and hypotheses when lower-privilege behavior suspiciously matches privileged behavior.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the assessment ledger.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Component name for the assessment ledger.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Coverage surface being tested, such as "Order authorization matrix".</description>
+    </parameter>
+    <parameter name="method" required="true">
+      <description>HTTP method for the tested request.</description>
+    </parameter>
+    <parameter name="url" required="true">
+      <description>Absolute URL of the tested endpoint.</description>
+    </parameter>
+    <parameter name="cases" required="true">
+      <description>List of request variants. Each item must include name and method, and may provide url or path plus a saved session_profile/session_profile_id. Items may also include headers, cookies, params, body, json_body, and delay_ms overrides.</description>
+    </parameter>
+    <parameter name="baseline_case" required="false">
+      <description>Optional case name to treat as the privileged or expected baseline. Strongly recommended for clearer authz comparisons.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request timeout in seconds. Default: 15.</description>
+    </parameter>
+    <parameter name="follow_redirects" required="false">
+      <description>Whether redirects should be followed. Default: false.</description>
+    </parameter>
+    <parameter name="similarity_threshold" required="false">
+      <description>Body-preview similarity threshold for suspicious parity detection. Default: 0.98.</description>
+    </parameter>
+    <parameter name="success_statuses" required="false">
+      <description>Optional list of HTTP status codes to treat as successful access.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="race_condition_harness">
+  <description>Execute concurrent HTTP request variants repeatedly to surface race-condition signals, then record structured coverage, evidence, and hypotheses in the assessment ledger.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the assessment ledger.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Component name for the assessment ledger.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Coverage surface being tested, such as "Coupon redemption race".</description>
+    </parameter>
+    <parameter name="requests" required="true">
+      <description>List of concurrent request definitions. Each item must include name and method, and may provide url or path plus a saved session_profile/session_profile_id. Items may also include headers, cookies, params, body, json_body, and delay_ms overrides.</description>
+    </parameter>
+    <parameter name="iterations" required="false">
+      <description>How many concurrent bursts to execute. Default: 5.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request timeout in seconds. Default: 15.</description>
+    </parameter>
+    <parameter name="follow_redirects" required="false">
+      <description>Whether redirects should be followed. Default: false.</description>
+    </parameter>
+    <parameter name="expect_single_success" required="false">
+      <description>Set to true when only one concurrent request should succeed. Multiple successes will be flagged as suspicious.</description>
+    </parameter>
+    <parameter name="success_statuses" required="false">
+      <description>Optional list of HTTP status codes to treat as successful outcomes.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="payload_probe_harness">
+  <description>Execute a baseline request plus mutated payload variants against a chosen input, then triage response, semantic response markers, and optional OOB anomalies into structured coverage, evidence, and hypotheses.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the assessment ledger.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Component or subsystem associated with the probed surface.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Coverage surface being actively probed.</description>
+    </parameter>
+    <parameter name="vulnerability_type" required="true">
+      <description>Bug class driving payload selection, such as sqli or ssrf.</description>
+    </parameter>
+    <parameter name="parameter_name" required="true">
+      <description>Name of the query/body/json/header field to mutate. For nested JSON, dotted paths such as filters.query are supported.</description>
+    </parameter>
+    <parameter name="base_request" required="true">
+      <description>Base request definition. Same shape as role_matrix_test cases: include method and url or path/base_url, and optionally headers, cookies, params, body, json_body, or a saved session_profile/session_profile_id.</description>
+    </parameter>
+    <parameter name="payloads" required="false">
+      <description>Optional explicit payload objects or strings. When omitted, contextual payloads are generated automatically.</description>
+    </parameter>
+    <parameter name="callback_urls" required="false">
+      <description>Optional callback/OOB URLs to embed when payload generation is automatic.</description>
+    </parameter>
+    <parameter name="semantic_matchers" required="false">
+      <description>Optional response markers that should count as semantic exploit signals when they appear in mutated responses, such as root:x:0:0 or 49.</description>
+    </parameter>
+    <parameter name="baseline_value" required="false">
+      <description>Optional safe/control value to inject into the baseline request before comparing mutated variants.</description>
+    </parameter>
+    <parameter name="injection_mode" required="false">
+      <description>Where to inject the payload: query, body, json, header, or raw_body. Default: query.</description>
+    </parameter>
+    <parameter name="header_name" required="false">
+      <description>Optional header name when injection_mode=header. Defaults to parameter_name.</description>
+    </parameter>
+    <parameter name="include_encodings" required="false">
+      <description>Whether automatic payload generation should include encoded variants. Default: true.</description>
+    </parameter>
+    <parameter name="max_payloads" required="false">
+      <description>Maximum number of payload variants to execute. Default: 6.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request timeout in seconds. Default: 15.</description>
+    </parameter>
+    <parameter name="follow_redirects" required="false">
+      <description>Whether redirects should be followed. Default: false.</description>
+    </parameter>
+    <parameter name="oob_harness_id" required="false">
+      <description>Optional OOB harness id to poll after firing payloads so blind callbacks can be tied back to the probe run.</description>
+    </parameter>
+    <parameter name="poll_oob" required="false">
+      <description>Whether to poll the referenced OOB harness after executing payload variants. Default: false.</description>
+    </parameter>
+    <parameter name="oob_wait_seconds" required="false">
+      <description>How long the OOB poll should wait for interactions. Default: 5.</description>
+    </parameter>
+    <parameter name="oob_poll_interval" required="false">
+      <description>Polling interval for OOB interaction collection. Default: 5.</description>
+    </parameter>
+    <parameter name="min_anomaly_score" required="false">
+      <description>Minimum anomaly score required before a variant is considered suspicious. Default: 4.</description>
+    </parameter>
+    <parameter name="persist_hypothesis" required="false">
+      <description>Whether suspicious anomalies should create a hypothesis in the shared ledger. Default: true.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="jwt_variant_harness">
+  <description>Replay a valid JWT-protected request with forged, unsigned, malformed, and missing-token variants to detect response parity that suggests JWT validation bypass.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label for the assessment ledger.</description>
+    </parameter>
+    <parameter name="component" required="true">
+      <description>Component or subsystem associated with the protected surface.</description>
+    </parameter>
+    <parameter name="surface" required="true">
+      <description>Coverage surface being checked for JWT validation weaknesses.</description>
+    </parameter>
+    <parameter name="base_request" required="true">
+      <description>Base authenticated request definition. Same shape as role_matrix_test cases: include method and url or path/base_url, and optionally headers, cookies, params, body, json_body, or a saved session_profile/session_profile_id.</description>
+    </parameter>
+    <parameter name="jwt_token" required="true">
+      <description>The valid JWT used for the baseline request.</description>
+    </parameter>
+    <parameter name="token_location" required="false">
+      <description>Where the JWT is carried in the request: auto, header, cookie, or query. Default: auto.</description>
+    </parameter>
+    <parameter name="header_name" required="false">
+      <description>Header carrying the token when token_location=header. Default: Authorization.</description>
+    </parameter>
+    <parameter name="header_prefix" required="false">
+      <description>Prefix prepended before the token when token_location=header, such as Bearer. Default: Bearer.</description>
+    </parameter>
+    <parameter name="cookie_name" required="false">
+      <description>Cookie name carrying the token when token_location=cookie, or a hint when auto-detecting cookie-carried JWTs.</description>
+    </parameter>
+    <parameter name="query_parameter_name" required="false">
+      <description>Query parameter carrying the token when token_location=query, or a hint when auto-detecting query-carried JWTs.</description>
+    </parameter>
+    <parameter name="claim_overrides" required="false">
+      <description>Optional claim overrides to apply when building forged admin/elevated variants.</description>
+    </parameter>
+    <parameter name="include_admin_variants" required="false">
+      <description>Whether to include elevated-claim unsigned variants. Default: true.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request timeout in seconds. Default: 15.</description>
+    </parameter>
+    <parameter name="follow_redirects" required="false">
+      <description>Whether redirects should be followed. Default: false.</description>
+    </parameter>
+    <parameter name="similarity_threshold" required="false">
+      <description>Body-preview similarity threshold for suspicious parity detection. Default: 0.98.</description>
+    </parameter>
+    <parameter name="success_statuses" required="false">
+      <description>Optional list of HTTP status codes to treat as successful access when comparing forged variants to the baseline.</description>
+    </parameter>
+  </parameters>
+</tool>

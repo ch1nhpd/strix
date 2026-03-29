@@ -3,7 +3,7 @@ import re
 from strix.utils.resource_paths import get_strix_resource_path
 
 
-_EXCLUDED_CATEGORIES = {"scan_modes", "coordination"}
+_EXCLUDED_CATEGORIES = {"assessment_objectives", "coordination", "scan_modes"}
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
 
 

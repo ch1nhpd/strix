@@ -1,0 +1,293 @@
+<tool name="security_tool_doctor">
+  <description>Check which first-class traditional security tools are available on PATH and capture lightweight version information so the agent can choose a realistic toolchain before scanning.</description>
+  <parameters>
+    <parameter name="tool_names" required="false">
+      <description>Optional subset of supported tools to inspect. Supported values include arjun, bandit, dirsearch, ffuf, httpx, jwt_tool, katana, naabu, nuclei, nmap, semgrep, sqlmap, subfinder, trivy, trufflehog, wapiti, wafw00f, and zaproxy.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="run_security_tool_pipeline">
+  <description>Run an opinionated multi-tool assessment pipeline that orchestrates wrapped recon, discovery, and code-scanning tools while keeping all step outputs normalized into the shared assessment ledger.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label used for all child runs, coverage, and evidence.</description>
+    </parameter>
+    <parameter name="mode" required="false">
+      <description>Pipeline mode: blackbox, repo, or hybrid. Default: blackbox.</description>
+    </parameter>
+    <parameter name="targets" required="false">
+      <description>Optional list of seed domains, hosts, or URLs for the blackbox part of the pipeline.</description>
+    </parameter>
+    <parameter name="url" required="false">
+      <description>Optional primary URL to include in the pipeline's live-target set.</description>
+    </parameter>
+    <parameter name="target_path" required="false">
+      <description>Optional repository or filesystem path for the repo/hybrid part of the pipeline.</description>
+    </parameter>
+    <parameter name="deep" required="false">
+      <description>Whether to include deeper enrichment and active scanning steps such as nmap default scripts, wapiti, and zaproxy. Default: false.</description>
+    </parameter>
+    <parameter name="max_host_targets" required="false">
+      <description>Maximum number of host/domain targets to fan out into host-oriented scans. Default: 20.</description>
+    </parameter>
+    <parameter name="max_live_targets" required="false">
+      <description>Maximum number of live URLs to fan out into crawl and nuclei steps. Default: 8.</description>
+    </parameter>
+    <parameter name="max_active_targets" required="false">
+      <description>Maximum number of live URLs to fan out into per-URL active scanners such as arjun, dirsearch, wapiti, or zaproxy. Default: 3.</description>
+    </parameter>
+    <parameter name="max_seed_items" required="false">
+      <description>Maximum number of discovery coverage items each child run should seed. Default: 25.</description>
+    </parameter>
+    <parameter name="max_hypotheses" required="false">
+      <description>Maximum number of findings each child run should convert into hypotheses. Default: 12.</description>
+    </parameter>
+    <parameter name="reuse_previous_runs" required="false">
+      <description>When true, reuse prior successful runs with the same normalized scope instead of rerunning them. Default: true.</description>
+    </parameter>
+    <parameter name="auto_synthesize_hypotheses" required="false">
+      <description>When true, synthesize additional creative hypotheses from the resulting assessment state after the pipeline completes. Default: true.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="run_security_focus_pipeline">
+  <description>Run a focused depth-first pipeline for a specific high-value bug class once broad recon has already surfaced leads. Supported focus values are auth_jwt, ssrf_oob, sqli, ssti, xxe, file_upload, path_traversal, authz, and workflow_race.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label used for all child runs, coverage, evidence, and hypotheses.</description>
+    </parameter>
+    <parameter name="focus" required="true">
+      <description>Which depth-first focus pipeline to run: auth_jwt, ssrf_oob, sqli, ssti, xxe, file_upload, path_traversal, authz, or workflow_race.</description>
+    </parameter>
+    <parameter name="targets" required="false">
+      <description>Optional list of seed domains, hosts, or URLs to bootstrap candidate surfaces before focusing.</description>
+    </parameter>
+    <parameter name="url" required="false">
+      <description>Optional primary URL for the focus pipeline. When omitted, the pipeline can derive candidate requests from runtime inventory, workflow traces, and saved session profiles.</description>
+    </parameter>
+    <parameter name="target_path" required="false">
+      <description>Optional repository or source path for whitebox sink discovery that can bias focused blackbox validation toward template, XML, upload, or file-serving sinks.</description>
+    </parameter>
+    <parameter name="headers" required="false">
+      <description>Optional HTTP headers used by auth/JWT, SQLi, and other focused follow-up steps.</description>
+    </parameter>
+    <parameter name="jwt_token" required="false">
+      <description>JWT value to analyze with jwt_tool or to inject into an Authorization header when one was not explicitly supplied.</description>
+    </parameter>
+    <parameter name="callback_base_url" required="false">
+      <description>Manual callback base URL for SSRF/OOB payload generation when interactsh is not desired.</description>
+    </parameter>
+    <parameter name="canary_value" required="false">
+      <description>Optional canary value for jwt_tool exploit attempts.</description>
+    </parameter>
+    <parameter name="public_key_path" required="false">
+      <description>Optional public key path for jwt_tool verification or key-confusion scenarios.</description>
+    </parameter>
+    <parameter name="dictionary_path" required="false">
+      <description>Optional dictionary path for jwt_tool cracking mode.</description>
+    </parameter>
+    <parameter name="max_active_targets" required="false">
+      <description>Maximum number of candidate URLs or URL/parameter pairs to deepen. Default: 3.</description>
+    </parameter>
+    <parameter name="max_hypotheses" required="false">
+      <description>Maximum number of findings or synthesized ideas to promote into hypotheses. Default: 12.</description>
+    </parameter>
+    <parameter name="reuse_previous_runs" required="false">
+      <description>When true, reuse prior successful runs with the same normalized scope instead of rerunning them. Default: true.</description>
+    </parameter>
+    <parameter name="auto_synthesize_hypotheses" required="false">
+      <description>When true, synthesize additional creative hypotheses from the resulting assessment state after the focus pipeline completes. Default: true.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="run_security_tool_scan">
+  <description>Run a supported traditional security tool and normalize the results into the assessment ledger, including discovery coverage, evidence, and hypotheses where appropriate.</description>
+  <parameters>
+    <parameter name="tool_name" required="true">
+      <description>Which wrapped tool to run: arjun, bandit, dirsearch, ffuf, httpx, jwt_tool, katana, naabu, nuclei, nmap, semgrep, sqlmap, subfinder, trivy, trufflehog, wapiti, wafw00f, or zaproxy.</description>
+    </parameter>
+    <parameter name="target" required="true">
+      <description>Logical target label used for coverage, evidence, and hypothesis recording.</description>
+    </parameter>
+    <parameter name="component" required="false">
+      <description>Optional logical component label for the run record and evidence. Defaults to toolchain:&lt;tool_name&gt;.</description>
+    </parameter>
+    <parameter name="targets" required="false">
+      <description>List-driven targets for supported tools, such as URLs for httpx/katana/nuclei, domains for subfinder, or hosts for naabu/nmap.</description>
+    </parameter>
+    <parameter name="target_path" required="false">
+      <description>Filesystem path to scan with semgrep, bandit, or trufflehog.</description>
+    </parameter>
+    <parameter name="url" required="false">
+      <description>Single target URL for arjun, dirsearch, ffuf, sqlmap, wapiti, or zaproxy.</description>
+    </parameter>
+    <parameter name="wordlist_path" required="false">
+      <description>Wordlist path for ffuf.</description>
+    </parameter>
+    <parameter name="raw_request_path" required="false">
+      <description>Raw request file path for sqlmap.</description>
+    </parameter>
+    <parameter name="paths" required="false">
+      <description>Optional path list for httpx probing.</description>
+    </parameter>
+    <parameter name="headers" required="false">
+      <description>Optional HTTP header map for ffuf or sqlmap.</description>
+    </parameter>
+    <parameter name="data" required="false">
+      <description>Optional request body data for arjun, ffuf, or sqlmap.</description>
+    </parameter>
+    <parameter name="request_method" required="false">
+      <description>HTTP method for tools that support method-aware probing, such as arjun. Default: GET.</description>
+    </parameter>
+    <parameter name="ports" required="false">
+      <description>Explicit port specification for naabu or nmap, such as 80,443,8080 or 1-1000.</description>
+    </parameter>
+    <parameter name="top_ports" required="false">
+      <description>Top-ports profile size for naabu or nmap when explicit ports are not provided.</description>
+    </parameter>
+    <parameter name="parameter" required="false">
+      <description>Specific parameter hint for sqlmap.</description>
+    </parameter>
+    <parameter name="configs" required="false">
+      <description>Semgrep config or ruleset identifiers.</description>
+    </parameter>
+    <parameter name="tags" required="false">
+      <description>Nuclei tag filters.</description>
+    </parameter>
+    <parameter name="severities" required="false">
+      <description>Optional severity filters for nuclei or semgrep.</description>
+    </parameter>
+    <parameter name="proxy_url" required="false">
+      <description>Optional explicit upstream proxy URL for the wrapped tool where supported.</description>
+    </parameter>
+    <parameter name="automatic_scan" required="false">
+      <description>Enable Nuclei automatic-scan mode when tags are not provided. Default: false.</description>
+    </parameter>
+    <parameter name="active_only" required="false">
+      <description>For recon tools that support it, restrict to actively verified results. Useful with subfinder. Default: false.</description>
+    </parameter>
+    <parameter name="collect_sources" required="false">
+      <description>Include source metadata where the wrapped tool supports it. Useful with subfinder. Default: false.</description>
+    </parameter>
+    <parameter name="no_interactsh" required="false">
+      <description>Disable Nuclei interactsh/OAST usage. Default: false.</description>
+    </parameter>
+    <parameter name="use_js_crawl" required="false">
+      <description>Enable Katana JavaScript crawling. Default: true.</description>
+    </parameter>
+    <parameter name="headless" required="false">
+      <description>Enable Katana headless crawling. Default: false.</description>
+    </parameter>
+    <parameter name="known_files" required="false">
+      <description>Katana known-files mode such as robotstxt, sitemapxml, or all. Default: robotstxt.</description>
+    </parameter>
+    <parameter name="recursion" required="false">
+      <description>Enable ffuf or dirsearch recursion. Default: false.</description>
+    </parameter>
+    <parameter name="recursion_depth" required="false">
+      <description>ffuf or dirsearch recursion depth. Default: 2.</description>
+    </parameter>
+    <parameter name="scan_type" required="false">
+      <description>Optional scan-mode override for tools such as naabu or nmap, for example connect, syn, or -sT.</description>
+    </parameter>
+    <parameter name="host_discovery_disabled" required="false">
+      <description>Skip ping-based host discovery where the wrapped tool supports it. Default: true.</description>
+    </parameter>
+    <parameter name="service_detection" required="false">
+      <description>Enable service detection for tools such as nmap. Default: false.</description>
+    </parameter>
+    <parameter name="default_scripts" required="false">
+      <description>Enable default script execution for tools such as nmap. Default: false.</description>
+    </parameter>
+    <parameter name="store_response" required="false">
+      <description>Store httpx responses alongside the run. Default: false.</description>
+    </parameter>
+    <parameter name="flush_session" required="false">
+      <description>Flush sqlmap cached session state before running. Default: false.</description>
+    </parameter>
+    <parameter name="threads" required="false">
+      <description>General thread count for supported tools. Default: 20.</description>
+    </parameter>
+    <parameter name="rate_limit" required="false">
+      <description>Request rate cap for supported tools. Default: 50.</description>
+    </parameter>
+    <parameter name="concurrency" required="false">
+      <description>Concurrency value for Katana, Nuclei, or Semgrep. Default: 20.</description>
+    </parameter>
+    <parameter name="bulk_size" required="false">
+      <description>Nuclei bulk-size setting. Default: 20.</description>
+    </parameter>
+    <parameter name="depth" required="false">
+      <description>Katana crawl depth. Default: 3.</description>
+    </parameter>
+    <parameter name="timeout" required="false">
+      <description>Per-request or per-file timeout in seconds. Default: 10.</description>
+    </parameter>
+    <parameter name="retries" required="false">
+      <description>Retry count. Default: 1.</description>
+    </parameter>
+    <parameter name="max_time_minutes" required="false">
+      <description>Overall runtime cap in minutes for tools that support it, such as subfinder.</description>
+    </parameter>
+    <parameter name="host_timeout" required="false">
+      <description>Host timeout string for tools such as nmap, for example 90s or 3m.</description>
+    </parameter>
+    <parameter name="script_timeout" required="false">
+      <description>Script timeout string for tools such as nmap, for example 30s.</description>
+    </parameter>
+    <parameter name="level" required="false">
+      <description>sqlmap testing level. Default: 2.</description>
+    </parameter>
+    <parameter name="risk" required="false">
+      <description>sqlmap risk level. Default: 1.</description>
+    </parameter>
+    <parameter name="zapit" required="false">
+      <description>Enable ZAP attack mode during quick scanning where supported. Default: false.</description>
+    </parameter>
+    <parameter name="jwt_token" required="false">
+      <description>JWT value for jwt_tool when the token should be supplied directly instead of inferred from a request.</description>
+    </parameter>
+    <parameter name="canary_value" required="false">
+      <description>Optional canary value for jwt_tool exploit attempts.</description>
+    </parameter>
+    <parameter name="public_key_path" required="false">
+      <description>Optional public key path for jwt_tool verification or key-confusion checks.</description>
+    </parameter>
+    <parameter name="dictionary_path" required="false">
+      <description>Optional dictionary path for jwt_tool cracking mode.</description>
+    </parameter>
+    <parameter name="output_path" required="false">
+      <description>Optional explicit output file path instead of an autogenerated temp path.</description>
+    </parameter>
+    <parameter name="include_findings" required="false">
+      <description>Whether to include normalized findings in the tool response. Default: false.</description>
+    </parameter>
+    <parameter name="max_seed_items" required="false">
+      <description>Maximum number of discovery coverage items to seed from path-finding or parameter-discovery tools. Default: 25.</description>
+    </parameter>
+    <parameter name="max_hypotheses" required="false">
+      <description>Maximum number of scanner or parameter-risk findings to convert into in-progress coverage plus open hypotheses. Default: 12.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="list_security_tool_runs">
+  <description>List prior wrapped-tool runs for the current assessment root so follow-on agents can reuse findings and evidence instead of rerunning the same discovery blindly.</description>
+  <parameters>
+    <parameter name="target" required="false">
+      <description>Optional logical target filter.</description>
+    </parameter>
+    <parameter name="tool_name" required="false">
+      <description>Optional tool-name filter.</description>
+    </parameter>
+    <parameter name="include_findings" required="false">
+      <description>Whether to include normalized findings in each returned run record. Default: false.</description>
+    </parameter>
+    <parameter name="max_items" required="false">
+      <description>Maximum number of run records to return. Default: 25.</description>
+    </parameter>
+  </parameters>
+</tool>
