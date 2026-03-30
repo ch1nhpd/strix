@@ -53,6 +53,8 @@ SUPPORTED_FOCUS_PIPELINES = {
     "auth_jwt",
     "ssrf_oob",
     "sqli",
+    "xss",
+    "open_redirect",
     "ssti",
     "xxe",
     "file_upload",
@@ -216,9 +218,145 @@ STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 FOCUS_PARAMETER_HINTS = {
     "ssrf_oob": ["callback", "webhook", "url", "uri", "endpoint"],
     "sqli": ["id", "query", "search", "filter", "sort"],
+    "xss": [
+        "q",
+        "query",
+        "search",
+        "comment",
+        "message",
+        "content",
+        "html",
+        "bio",
+        "description",
+        "feedback",
+        "title",
+        "name",
+    ],
+    "open_redirect": [
+        "redirect",
+        "return",
+        "next",
+        "continue",
+        "dest",
+        "destination",
+        "target",
+        "url",
+        "uri",
+        "link",
+    ],
     "ssti": ["template", "view", "render", "html", "content", "message"],
     "path_traversal": ["file", "path", "filename", "document", "download"],
 }
+CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2}
+VERIFICATION_ORDER = {"raw": 0, "correlated": 1, "validated": 2}
+AUTO_FOCUS_PRIORITY = {
+    "authz": 0,
+    "workflow_race": 1,
+    "ssrf_oob": 2,
+    "sqli": 3,
+    "auth_jwt": 4,
+    "xss": 5,
+    "open_redirect": 6,
+    "path_traversal": 7,
+    "ssti": 8,
+    "xxe": 9,
+    "file_upload": 10,
+}
+AUTO_FOCUS_SIGNAL_KEYWORDS = {
+    "authz": [
+        "account",
+        "admin",
+        "invoice",
+        "member",
+        "order",
+        "profile",
+        "project",
+        "tenant",
+        "user",
+        "workspace",
+    ],
+    "workflow_race": [
+        "amount",
+        "balance",
+        "cart",
+        "checkout",
+        "coupon",
+        "credit",
+        "discount",
+        "inventory",
+        "invoice",
+        "limit",
+        "payment",
+        "price",
+        "quantity",
+        "redeem",
+        "refund",
+        "stock",
+        "transfer",
+        "wallet",
+    ],
+    "xss": [
+        "bio",
+        "comment",
+        "content",
+        "feedback",
+        "html",
+        "message",
+        "preview",
+        "q",
+        "query",
+        "search",
+    ],
+    "open_redirect": [
+        "bounce",
+        "continue",
+        "dest",
+        "destination",
+        "link",
+        "next",
+        "out",
+        "redirect",
+        "return",
+        "target",
+        "url",
+    ],
+}
+HIGH_SIGNAL_FINDING_KEYWORDS = (
+    "alg:none",
+    "blind sql",
+    "command injection",
+    "default credential",
+    "default password",
+    "deserialization",
+    "graphql introspection",
+    "key confusion",
+    "path traversal",
+    "remote code execution",
+    "server-side request forgery",
+    "sql injection",
+    "ssrf",
+    "ssti",
+    "template injection",
+    "token disclosure",
+    "weak secret",
+    "xml external entity",
+    "xxe",
+)
+LOW_SIGNAL_FINDING_KEYWORDS = (
+    "application error disclosure",
+    "cookie no httponly",
+    "cookie without httponly",
+    "cookie without secure",
+    "cross-domain javascript source file inclusion",
+    "missing anti-csrf",
+    "missing x-frame-options",
+    "modern web application",
+    "server leaks version information",
+    "strict-transport-security",
+    "tech detect",
+    "timestamp disclosure",
+    "x-content-type-options",
+)
 XML_CONTENT_TYPE_MARKERS = ("application/xml", "text/xml", "soap", "svg+xml")
 XML_PATH_KEYWORDS = ("xml", "soap", "feed", "import", "saml")
 UPLOAD_PATH_KEYWORDS = ("upload", "avatar", "attachment", "document", "file", "image", "import")
@@ -254,6 +392,8 @@ CODE_SCAN_IGNORED_DIRS = {
 }
 SINK_PRIORITY_RANK = {"critical": 4, "high": 3, "normal": 2, "low": 1}
 FOCUS_SOURCE_HINTS = {
+    "xss": ["html", "content", "message", "comment", "bio", "description"],
+    "open_redirect": ["redirect", "return", "next", "continue", "target", "url"],
     "ssti": ["template", "view", "render", "html", "content", "message"],
     "xxe": ["xml", "body", "payload", "document", "feed", "svg"],
     "file_upload": ["file", "upload", "image", "avatar", "attachment", "document"],
@@ -275,6 +415,34 @@ GENERIC_REQUEST_SOURCE_MARKERS = (
 VIEWER_PATH_KEYWORDS = ("view", "preview", "profile", "account", "avatar", "image", "media", "file", "document", "attachment", "download")
 UPLOAD_SKIP_SEGMENTS = {"upload", "uploads", "file", "files", "image", "images", "attachment", "attachments", "document", "documents", "avatar", "import"}
 FOCUS_CODE_SINK_PATTERNS: dict[str, list[dict[str, Any]]] = {
+    "xss": [
+        {
+            "regex": r"(dangerouslySetInnerHTML|innerHTML\s*=|outerHTML\s*=|v-html|mark_safe\s*\(|Markup\s*\()",
+            "kind": "html_render_sink",
+            "summary": "User-controlled HTML rendering sink",
+            "priority": "critical",
+        },
+        {
+            "regex": r"(render\(.*unescaped|unsafeHTML|bypassSecurityTrustHtml|RawHtml|HtmlString)",
+            "kind": "unsafe_html_bypass",
+            "summary": "Explicit unsafe HTML trust bypass",
+            "priority": "high",
+        },
+    ],
+    "open_redirect": [
+        {
+            "regex": r"(redirect\s*\(|RedirectResponse\s*\(|res\.redirect\s*\(|response\.redirect\s*\(|HttpResponseRedirect\s*\()",
+            "kind": "redirect_sink",
+            "summary": "Dynamic redirect sink",
+            "priority": "high",
+        },
+        {
+            "regex": r"(window\.location|location\.href|location\.assign|location\.replace)",
+            "kind": "client_redirect_sink",
+            "summary": "Client-side redirect sink",
+            "priority": "normal",
+        },
+    ],
     "ssti": [
         {
             "regex": r"render_template_string\s*\(",
@@ -934,6 +1102,299 @@ def _infer_vulnerability_type(tool_name: str, finding: dict[str, Any]) -> str:
     return "scanner_finding"
 
 
+def _priority_rank(priority: str | None) -> int:
+    candidate = str(priority or "").strip().lower()
+    if candidate in VALID_PRIORITIES:
+        return VALID_PRIORITIES.index(candidate)
+    return 0
+
+
+def _highest_priority(*priorities: str | None) -> str:
+    selected = "low"
+    for priority in priorities:
+        if _priority_rank(priority) > _priority_rank(selected):
+            selected = str(priority or "").strip().lower()
+    return selected if selected in VALID_PRIORITIES else "low"
+
+
+def _confidence_rank(confidence: str | None) -> int:
+    return CONFIDENCE_ORDER.get(str(confidence or "").strip().lower(), 0)
+
+
+def _verification_rank(state: str | None) -> int:
+    return VERIFICATION_ORDER.get(str(state or "").strip().lower(), 0)
+
+
+def _finding_signal_text(finding: dict[str, Any]) -> str:
+    values = [
+        finding.get("template_id"),
+        finding.get("matched_at"),
+        finding.get("finding_id"),
+        finding.get("check_id"),
+        finding.get("script_id"),
+        finding.get("detector"),
+        finding.get("parameter"),
+        finding.get("message"),
+        finding.get("name"),
+        finding.get("path"),
+        finding.get("url"),
+        " ".join(str(tag) for tag in finding.get("tags", [])),
+    ]
+    return " ".join(str(value).strip().lower() for value in values if str(value or "").strip())
+
+
+def _map_vulnerability_type_to_focus(vulnerability_type: str, *, text: str) -> str | None:
+    if vulnerability_type in {"authorization", "idor"}:
+        return "authz"
+    if vulnerability_type == "ssrf":
+        return "ssrf_oob"
+    if vulnerability_type == "sqli":
+        return "sqli"
+    if vulnerability_type == "xss":
+        return "xss"
+    if vulnerability_type == "open_redirect":
+        return "open_redirect"
+    if vulnerability_type == "ssti":
+        return "ssti"
+    if vulnerability_type in {"path_traversal", "lfi"}:
+        return "path_traversal"
+    if vulnerability_type == "xxe":
+        return "xxe"
+    if vulnerability_type == "file_upload":
+        return "file_upload"
+    if vulnerability_type == "jwt":
+        return "auth_jwt"
+    if vulnerability_type == "business_logic":
+        return "workflow_race"
+    if vulnerability_type == "authentication" and any(
+        marker in text for marker in ("jwt", "token", "bearer", "authorization", "session")
+    ):
+        return "auth_jwt"
+    return None
+
+
+def _focus_signal_boost(
+    focus: str,
+    *,
+    path: str,
+    parameter_name: str,
+    text: str,
+) -> int:
+    keywords = list(AUTO_FOCUS_SIGNAL_KEYWORDS.get(focus, []))
+    if not keywords:
+        return 0
+    searchable = " ".join(
+        [
+            str(path or "").strip().lower(),
+            str(parameter_name or "").strip().lower(),
+            str(text or "").strip().lower(),
+        ]
+    )
+    matches = sum(1 for keyword in keywords if keyword in searchable)
+    if matches >= 2:
+        return 2
+    if matches == 1:
+        return 1
+    return 0
+
+
+def _focus_candidates_for_finding(
+    tool_name: str,
+    finding: dict[str, Any],
+    *,
+    vulnerability_type: str | None = None,
+) -> list[str]:
+    effective_vulnerability_type = vulnerability_type or _infer_vulnerability_type(tool_name, finding)
+    text = _finding_signal_text(finding)
+    path = _path_for_finding(finding).lower()
+    parameter_name = str(finding.get("parameter") or "").strip().lower()
+    candidates: list[str] = []
+
+    mapped_focus = _map_vulnerability_type_to_focus(effective_vulnerability_type, text=text)
+    if mapped_focus:
+        candidates.append(mapped_focus)
+
+    if effective_vulnerability_type in {
+        "authentication",
+        "authorization",
+        "business_logic",
+        "cors",
+        "csrf",
+        "idor",
+        "misconfiguration",
+        "scanner_finding",
+        "xss",
+    }:
+        parameter_vulnerability = (
+            _infer_parameter_vulnerability_type(parameter_name) if parameter_name else None
+        )
+        parameter_focus = (
+            _map_vulnerability_type_to_focus(parameter_vulnerability, text=text)
+            if parameter_vulnerability
+            else None
+        )
+        if parameter_focus:
+            candidates.append(parameter_focus)
+
+        if any(keyword in path for keyword in XML_PATH_KEYWORDS):
+            candidates.append("xxe")
+        if any(keyword in path for keyword in UPLOAD_PATH_KEYWORDS):
+            candidates.append("file_upload")
+        if any(keyword in path for keyword in ("download", "document", "attachment", "file")):
+            candidates.append("path_traversal")
+        if any(keyword in path for keyword in ("search", "comment", "feedback", "message", "preview")):
+            candidates.append("xss")
+        if any(keyword in path for keyword in ("redirect", "bounce", "out")):
+            candidates.append("open_redirect")
+        if any(
+            keyword in path
+            for keyword in ("admin", "account", "profile", "tenant", "order", "invoice", "payment", "checkout", "export")
+        ):
+            candidates.append("authz")
+        if any(
+            keyword in path for keyword in ("cart", "checkout", "coupon", "invoice", "payment", "redeem")
+        ):
+            candidates.append("workflow_race")
+        if any(marker in text for marker in ("jwt", "token", "bearer", "authorization", "session")):
+            candidates.append("auth_jwt")
+
+    return _unique_strings(
+        [candidate for candidate in candidates if candidate in SUPPORTED_FOCUS_PIPELINES]
+    )
+
+
+def _finding_candidate_url(tool_name: str, finding: dict[str, Any]) -> str | None:
+    for field in ["url", "matched_at"]:
+        value = str(finding.get(field) or "").strip()
+        if _is_http_url(value):
+            return value
+    host = _host_for_finding(tool_name, finding)
+    path = _path_for_finding(finding)
+    if host and host != tool_name:
+        return f"https://{host}{path}"
+    return None
+
+
+def _scanner_finding_verified(tool_name: str, finding: dict[str, Any], *, signal_text: str) -> bool:
+    if tool_name in {"sqlmap", "jwt_tool"}:
+        return True
+    if tool_name == "trufflehog":
+        return bool(finding.get("verified"))
+    if tool_name == "nmap":
+        return "vulnerable" in signal_text
+    return False
+
+
+def _triage_scanner_finding(tool_name: str, finding: dict[str, Any]) -> dict[str, Any]:
+    vulnerability_type = str(
+        finding.get("vulnerability_type") or _infer_vulnerability_type(tool_name, finding)
+    )
+    path = _path_for_finding(finding)
+    parameter_name = str(finding.get("parameter") or "").strip()
+    severity_priority = _priority_from_severity(
+        str(finding.get("severity") or finding.get("priority") or "medium")
+    )
+    path_priority = _priority_for_path(path)
+    parameter_priority = _priority_for_parameter(parameter_name) if parameter_name else "low"
+    effective_priority = _highest_priority(severity_priority, path_priority, parameter_priority)
+    signal_text = _finding_signal_text(finding)
+    focus_candidates = _focus_candidates_for_finding(
+        tool_name,
+        finding,
+        vulnerability_type=vulnerability_type,
+    )
+    verified = _scanner_finding_verified(tool_name, finding, signal_text=signal_text)
+    raw_only_vulnerability = vulnerability_type in {"misconfiguration", "scanner_finding"}
+    low_signal = any(keyword in signal_text for keyword in LOW_SIGNAL_FINDING_KEYWORDS)
+    explicit_exploit_signal = raw_only_vulnerability is False or any(
+        keyword in signal_text for keyword in HIGH_SIGNAL_FINDING_KEYWORDS
+    )
+
+    score = 1 + _priority_rank(effective_priority)
+    if explicit_exploit_signal:
+        score += 2
+    if focus_candidates:
+        score += 1
+    if _looks_sensitive_path(path):
+        score += 1
+    if parameter_name and _priority_rank(parameter_priority) >= _priority_rank("high"):
+        score += 1
+    if tool_name in {"sqlmap", "jwt_tool"}:
+        score += 2
+    elif tool_name in {"bandit", "nmap", "semgrep", "trivy", "trufflehog"}:
+        score += 1
+    if raw_only_vulnerability and tool_name in {"nuclei", "wapiti", "zaproxy"}:
+        score -= 1
+    if low_signal:
+        score -= 2
+    if raw_only_vulnerability and not focus_candidates and _priority_rank(effective_priority) <= _priority_rank("normal"):
+        score -= 1
+    if verified:
+        score += 2
+
+    if score >= 6:
+        confidence = "high"
+    elif score >= 4:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    verification_state = "validated" if verified else "raw"
+    should_record_hypothesis = confidence != "low"
+    if raw_only_vulnerability and not verified and not focus_candidates:
+        should_record_hypothesis = _priority_rank(effective_priority) >= _priority_rank("high")
+    if (
+        raw_only_vulnerability
+        and tool_name in {"nuclei", "wapiti", "zaproxy"}
+        and confidence == "medium"
+        and not (
+            _looks_sensitive_path(path)
+            or _priority_rank(parameter_priority) >= _priority_rank("high")
+        )
+    ):
+        should_record_hypothesis = False
+    if tool_name in {"nuclei", "wapiti", "zaproxy"} and low_signal and not verified:
+        should_record_hypothesis = False
+
+    rationale_bits: list[str] = [f"scanner confidence={confidence}", f"verification={verification_state}"]
+    if focus_candidates:
+        rationale_bits.append(f"follow-up focus={', '.join(focus_candidates)}")
+    if low_signal:
+        rationale_bits.append("generic scanner wording lowers trust")
+    if verified:
+        rationale_bits.append(f"{tool_name} output looks directly confirmatory")
+
+    return {
+        "vulnerability_type": vulnerability_type,
+        "priority": effective_priority,
+        "confidence": confidence,
+        "verification_state": verification_state,
+        "requires_manual_confirmation": verification_state != "validated",
+        "requires_runtime_context": any(
+            focus in {"authz", "workflow_race"} for focus in focus_candidates
+        ),
+        "focus_candidates": focus_candidates,
+        "primary_focus": focus_candidates[0] if focus_candidates else None,
+        "should_record_hypothesis": should_record_hypothesis,
+        "score": score,
+        "rationale": "; ".join(rationale_bits),
+    }
+
+
+def _annotate_scanner_findings(tool_name: str, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for finding in findings:
+        triage = _triage_scanner_finding(tool_name, finding)
+        annotated.append(
+            {
+                **finding,
+                "vulnerability_type": triage["vulnerability_type"],
+                "triage": triage,
+            }
+        )
+    return annotated
+
+
 def _next_step_for_path(path: str) -> str:
     if _looks_sensitive_path(path):
         return (
@@ -1280,10 +1741,22 @@ def _record_scanner_findings(
         host = _host_for_finding(tool_name, finding)
         path = _path_for_finding(finding)
         component = _scanner_component(tool_name, host, finding)
-        priority = _priority_from_severity(
-            str(finding.get("severity") or finding.get("priority") or "medium")
+        triage = (
+            dict(finding.get("triage") or {})
+            if isinstance(finding.get("triage"), dict)
+            else _triage_scanner_finding(tool_name, finding)
         )
-        vulnerability_type = _infer_vulnerability_type(tool_name, finding)
+        priority = str(triage.get("priority") or "normal")
+        vulnerability_type = str(
+            triage.get("vulnerability_type") or _infer_vulnerability_type(tool_name, finding)
+        )
+        confidence = str(triage.get("confidence") or "low")
+        verification_state = str(triage.get("verification_state") or "raw")
+        focus_candidates = [
+            str(item).strip()
+            for item in list(triage.get("focus_candidates") or [])
+            if str(item).strip()
+        ]
 
         if tool_name == "nuclei":
             template_id = str(finding.get("template_id") or "unknown-template")
@@ -1377,6 +1850,7 @@ def _record_scanner_findings(
                 f"{finding.get('message') or 'possible SQL injection'}"
             )
 
+        rationale = f"{rationale} Triage: {triage.get('rationale') or 'scanner finding pending verification'}."
         coverage_result = record_coverage(
             agent_state=agent_state,
             target=logical_target,
@@ -1388,23 +1862,39 @@ def _record_scanner_findings(
             next_step=(
                 "Reproduce the scanner signal manually, verify exploitability, and capture targeted proof "
                 "before resolving this item"
+                if bool(triage.get("should_record_hypothesis"))
+                else (
+                    "Treat this as an unverified scanner signal; only escalate it if another tool, runtime "
+                    "context, or manual reproduction confirms the same behavior"
+                )
             ),
         )
-        hypothesis_result = record_hypothesis(
-            agent_state=agent_state,
-            hypothesis=(
-                f"{tool_name} indicates possible {vulnerability_type} on {surface.lower()}"
-            ),
-            target=logical_target,
-            component=str(coverage_result.get("record", {}).get("component") or component),
-            vulnerability_type=vulnerability_type,
-            status="open",
-            priority=priority,
-            rationale=rationale,
-        )
+        hypothesis_result = None
+        if bool(triage.get("should_record_hypothesis")):
+            focus_suffix = (
+                f" follow-up={', '.join(focus_candidates)}"
+                if focus_candidates
+                else ""
+            )
+            hypothesis_result = record_hypothesis(
+                agent_state=agent_state,
+                hypothesis=(
+                    f"{tool_name} indicates possible {vulnerability_type} on {surface.lower()}"
+                ),
+                target=logical_target,
+                component=str(coverage_result.get("record", {}).get("component") or component),
+                vulnerability_type=vulnerability_type,
+                status="open",
+                priority=priority,
+                rationale=(
+                    f"{rationale} Confidence={confidence}; verification_state={verification_state}."
+                    f"{focus_suffix}"
+                ),
+            )
         updates.append(
             {
                 "finding": finding,
+                "triage": triage,
                 "coverage_result": coverage_result,
                 "hypothesis_result": hypothesis_result,
             }
@@ -5256,7 +5746,14 @@ def _correlate_tool_run_signals(
 ) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for tool_name, finding in _tool_findings_for_runs(store, run_ids):
-        vulnerability_type = _infer_vulnerability_type(tool_name, finding)
+        triage = (
+            dict(finding.get("triage") or {})
+            if isinstance(finding.get("triage"), dict)
+            else _triage_scanner_finding(tool_name, finding)
+        )
+        vulnerability_type = str(
+            triage.get("vulnerability_type") or _infer_vulnerability_type(tool_name, finding)
+        )
         if vulnerability_type in {"scanner_finding", "misconfiguration"} and tool_name not in {
             "trivy",
         }:
@@ -5273,26 +5770,54 @@ def _correlate_tool_run_signals(
                 "tools": [],
                 "signals": [],
                 "max_priority": "low",
+                "max_confidence": "low",
+                "verification_state": "raw",
+                "focus_candidates": [],
+                "score": 0,
             },
         )
         if tool_name not in bucket["tools"]:
             bucket["tools"].append(tool_name)
         bucket["signals"].append(finding)
-        finding_priority = _priority_from_severity(
+        finding_priority = str(triage.get("priority") or _priority_from_severity(
             str(finding.get("severity") or finding.get("priority") or "medium")
-        )
+        ))
         if VALID_PRIORITIES.index(finding_priority) > VALID_PRIORITIES.index(bucket["max_priority"]):
             bucket["max_priority"] = finding_priority
+        confidence = str(triage.get("confidence") or "low")
+        if _confidence_rank(confidence) > _confidence_rank(str(bucket["max_confidence"])):
+            bucket["max_confidence"] = confidence
+        verification_state = str(triage.get("verification_state") or "raw")
+        if _verification_rank(verification_state) > _verification_rank(str(bucket["verification_state"])):
+            bucket["verification_state"] = verification_state
+        bucket["focus_candidates"] = _unique_strings(
+            [
+                *list(bucket["focus_candidates"]),
+                *[
+                    str(item).strip()
+                    for item in list(triage.get("focus_candidates") or [])
+                    if str(item).strip()
+                ],
+            ]
+        )
+        bucket["score"] += 1 + _confidence_rank(confidence)
 
     correlated: list[dict[str, Any]] = []
     for bucket in grouped.values():
         tool_count = len(bucket["tools"])
         if tool_count < 2:
             continue
+        if int(bucket["score"]) < 4 and str(bucket["max_priority"]) not in {"high", "critical"}:
+            continue
         path_priority = _priority_for_path(str(bucket["path"]))
         priority = bucket["max_priority"]
         if VALID_PRIORITIES.index(path_priority) > VALID_PRIORITIES.index(priority):
             priority = path_priority
+        confidence = (
+            "high"
+            if int(bucket["score"]) >= 6 or str(bucket["verification_state"]) == "validated"
+            else "medium"
+        )
         hypothesis_result = record_hypothesis(
             agent_state=agent_state,
             hypothesis=(
@@ -5306,7 +5831,8 @@ def _correlate_tool_run_signals(
             priority=priority,
             rationale=(
                 f"Multiple tools reported consistent signals on {bucket['host']}{bucket['path']}: "
-                f"{', '.join(bucket['tools'])}."
+                f"{', '.join(bucket['tools'])}. Confidence={confidence}; "
+                f"verification_state=correlated."
             ),
         )
         correlated.append(
@@ -5316,12 +5842,327 @@ def _correlate_tool_run_signals(
                 "vulnerability_type": bucket["vulnerability_type"],
                 "tools": bucket["tools"],
                 "signal_count": len(bucket["signals"]),
+                "confidence": confidence,
+                "verification_state": "correlated",
+                "focus_candidates": list(bucket["focus_candidates"]),
                 "hypothesis_result": hypothesis_result,
             }
         )
         if len(correlated) >= max_hypotheses:
             break
     return correlated
+
+
+def _auto_followup_score(
+    tool_name: str,
+    finding: dict[str, Any],
+    *,
+    confidence: str,
+    verification_state: str,
+    focus: str,
+) -> int:
+    path = _path_for_finding(finding)
+    parameter_name = str(finding.get("parameter") or "").strip()
+    signal_text = _finding_signal_text(finding)
+    score = 1 + _confidence_rank(confidence)
+    if verification_state == "validated":
+        score += 2
+    elif verification_state == "correlated":
+        score += 1
+    if tool_name == "arjun":
+        score += 1
+    if _looks_sensitive_path(path):
+        score += 1
+    if parameter_name and _priority_rank(_priority_for_parameter(parameter_name)) >= _priority_rank("high"):
+        score += 1
+    if focus in {"authz", "workflow_race"} and any(
+        keyword in path.lower()
+        for keyword in ("account", "admin", "checkout", "invoice", "order", "payment", "tenant")
+    ):
+        score += 1
+    score += _focus_signal_boost(
+        focus,
+        path=path,
+        parameter_name=parameter_name,
+        text=signal_text,
+    )
+    return score
+
+
+def _collect_auto_followup_focuses(
+    *,
+    store: dict[str, TOOL_RUN],
+    run_ids: list[str],
+    correlated_hypotheses: list[dict[str, Any]],
+    deep: bool,
+    max_followups: int,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for tool_name, finding in _tool_findings_for_runs(store, run_ids):
+        triage = finding.get("triage") if isinstance(finding.get("triage"), dict) else {}
+        focus_candidates = [
+            str(item).strip()
+            for item in list(triage.get("focus_candidates") or _focus_candidates_for_finding(tool_name, finding))
+            if str(item).strip()
+        ]
+        if not focus_candidates:
+            continue
+        path = _path_for_finding(finding)
+        confidence = str(triage.get("confidence") or "")
+        if not confidence:
+            confidence = "medium" if tool_name == "arjun" or _looks_sensitive_path(path) else "low"
+        verification_state = str(triage.get("verification_state") or "raw")
+        candidate_url = _finding_candidate_url(tool_name, finding)
+        reason = str(
+            finding.get("name")
+            or finding.get("template_id")
+            or finding.get("parameter")
+            or finding.get("path")
+            or tool_name
+        )
+
+        for focus in focus_candidates:
+            score = _auto_followup_score(
+                tool_name,
+                finding,
+                confidence=confidence,
+                verification_state=verification_state,
+                focus=focus,
+            )
+            bucket = buckets.setdefault(
+                focus,
+                {
+                    "focus": focus,
+                    "confidence": "low",
+                    "verification_state": "raw",
+                    "score": 0,
+                    "tools": [],
+                    "reasons": [],
+                    "candidate_urls": [],
+                },
+            )
+            bucket["score"] += score
+            if _confidence_rank(confidence) > _confidence_rank(str(bucket["confidence"])):
+                bucket["confidence"] = confidence
+            if _verification_rank(verification_state) > _verification_rank(
+                str(bucket["verification_state"])
+            ):
+                bucket["verification_state"] = verification_state
+            if tool_name not in bucket["tools"]:
+                bucket["tools"].append(tool_name)
+            if reason not in bucket["reasons"]:
+                bucket["reasons"].append(reason)
+            if candidate_url and candidate_url not in bucket["candidate_urls"]:
+                bucket["candidate_urls"].append(candidate_url)
+
+    for item in correlated_hypotheses:
+        focus_candidates = [
+            str(candidate).strip()
+            for candidate in list(item.get("focus_candidates") or [])
+            if str(candidate).strip()
+        ]
+        if not focus_candidates:
+            mapped_focus = _map_vulnerability_type_to_focus(
+                str(item.get("vulnerability_type") or ""),
+                text=str(item.get("vulnerability_type") or ""),
+            )
+            if mapped_focus:
+                focus_candidates = [mapped_focus]
+        for focus in focus_candidates:
+            bucket = buckets.setdefault(
+                focus,
+                {
+                    "focus": focus,
+                    "confidence": "low",
+                    "verification_state": "raw",
+                    "score": 0,
+                    "tools": [],
+                    "reasons": [],
+                    "candidate_urls": [],
+                },
+            )
+            bucket["score"] += 2 + min(int(item.get("signal_count") or 0), 2)
+            if _confidence_rank(str(item.get("confidence") or "medium")) > _confidence_rank(
+                str(bucket["confidence"])
+            ):
+                bucket["confidence"] = str(item.get("confidence") or "medium")
+            if _verification_rank("correlated") > _verification_rank(str(bucket["verification_state"])):
+                bucket["verification_state"] = "correlated"
+            for tool_name in list(item.get("tools") or []):
+                if tool_name not in bucket["tools"]:
+                    bucket["tools"].append(tool_name)
+            reason = f"correlated {item.get('vulnerability_type')} on {item.get('path') or '/'}"
+            if reason not in bucket["reasons"]:
+                bucket["reasons"].append(reason)
+            host = str(item.get("host") or "").strip()
+            path = str(item.get("path") or "/").strip() or "/"
+            if host:
+                candidate_url = f"https://{host}{path}"
+                if candidate_url not in bucket["candidate_urls"]:
+                    bucket["candidate_urls"].append(candidate_url)
+
+    minimum_score = 4 if deep else 5
+    candidates = [
+        {
+            **bucket,
+            "primary_url": (
+                str(bucket["candidate_urls"][0]).strip() if list(bucket["candidate_urls"]) else None
+            ),
+        }
+        for bucket in buckets.values()
+        if int(bucket.get("score") or 0) >= minimum_score
+        or str(bucket.get("verification_state") or "") == "validated"
+    ]
+    candidates.sort(
+        key=lambda item: (
+            -int(item.get("score") or 0),
+            AUTO_FOCUS_PRIORITY.get(str(item.get("focus") or ""), 99),
+            str(item.get("focus") or ""),
+        )
+    )
+    return candidates[:max_followups]
+
+
+def _run_pipeline_auto_followups(
+    agent_state: Any,
+    *,
+    logical_target: str,
+    steps: list[dict[str, Any]],
+    store: dict[str, TOOL_RUN],
+    run_ids: list[str],
+    correlated_hypotheses: list[dict[str, Any]],
+    deep: bool,
+    max_active_targets: int,
+    max_hypotheses: int,
+    reuse_previous_runs: bool,
+) -> list[dict[str, Any]]:
+    from .assessment_hunt_actions import run_inventory_differential_hunt
+    from .assessment_runtime_actions import map_runtime_surface
+    from .assessment_workflow_actions import discover_workflows_from_requests
+
+    candidate_focuses = _collect_auto_followup_focuses(
+        store=store,
+        run_ids=run_ids,
+        correlated_hypotheses=correlated_hypotheses,
+        deep=deep,
+        max_followups=2 if deep else 1,
+    )
+    if not candidate_focuses:
+        return []
+
+    followup_results: list[dict[str, Any]] = []
+    runtime_inventory_available = bool(_load_runtime_inventory_entries(agent_state, logical_target))
+    workflow_inventory_available = bool(_load_discovered_workflows(agent_state, logical_target))
+    session_profiles = _load_session_profiles(agent_state)
+    proxy_manager = _get_focus_proxy_manager()
+
+    for candidate in candidate_focuses:
+        focus = str(candidate.get("focus") or "").strip()
+        if not focus:
+            continue
+        primary_url = str(candidate.get("primary_url") or "").strip() or None
+        target_inputs = (
+            [_base_url(primary_url)] if primary_url and _base_url(primary_url) else None
+        )
+
+        runtime_result = None
+        workflow_result = None
+        differential_result = None
+        focus_result = None
+        skipped_reason = None
+
+        if focus == "authz":
+            if not runtime_inventory_available and proxy_manager is not None:
+                runtime_result = map_runtime_surface(
+                    agent_state=agent_state,
+                    target=logical_target,
+                    max_seed_items=max(max_hypotheses * 2, 20),
+                )
+                _append_pipeline_step(
+                    steps,
+                    step_name="map_runtime_surface",
+                    result=runtime_result,
+                    metadata={"trigger_focus": focus, "source_tools": list(candidate["tools"])},
+                )
+                runtime_inventory_available = bool(runtime_result.get("success"))
+            if runtime_inventory_available and len(session_profiles) >= 2:
+                differential_result = run_inventory_differential_hunt(
+                    agent_state=agent_state,
+                    target=logical_target,
+                    max_endpoints=max(1, min(max_hypotheses, 6)),
+                    min_priority="high",
+                )
+                _append_pipeline_step(
+                    steps,
+                    step_name="run_inventory_differential_hunt",
+                    result=differential_result,
+                    metadata={"trigger_focus": focus, "source_tools": list(candidate["tools"])},
+                )
+            else:
+                skipped_reason = (
+                    "authz follow-up needs runtime inventory and at least two session profiles"
+                )
+        elif focus == "workflow_race":
+            if not workflow_inventory_available and proxy_manager is not None:
+                workflow_result = discover_workflows_from_requests(
+                    agent_state=agent_state,
+                    target=logical_target,
+                    max_workflows=max(4, max_hypotheses),
+                )
+                _append_pipeline_step(
+                    steps,
+                    step_name="discover_workflows_from_requests",
+                    result=workflow_result,
+                    metadata={"trigger_focus": focus, "source_tools": list(candidate["tools"])},
+                )
+                workflow_inventory_available = bool(workflow_result.get("success"))
+            if not workflow_inventory_available:
+                skipped_reason = "workflow race follow-up needs proxy traffic or stored workflows"
+        elif primary_url is None:
+            skipped_reason = "focus follow-up needs a concrete URL candidate"
+
+        if skipped_reason is None:
+            focus_result = run_security_focus_pipeline(
+                agent_state=agent_state,
+                target=logical_target,
+                focus=focus,
+                targets=target_inputs,
+                url=primary_url,
+                max_active_targets=max(1, min(max_active_targets, 2)),
+                max_hypotheses=max_hypotheses,
+                reuse_previous_runs=reuse_previous_runs,
+                auto_synthesize_hypotheses=False,
+            )
+            _append_pipeline_step(
+                steps,
+                step_name=f"focus:{focus}",
+                result=focus_result,
+                metadata={
+                    "source_tools": list(candidate["tools"]),
+                    "confidence": candidate.get("confidence"),
+                    "verification_state": candidate.get("verification_state"),
+                },
+            )
+
+        followup_results.append(
+            {
+                "focus": focus,
+                "confidence": candidate.get("confidence"),
+                "verification_state": candidate.get("verification_state"),
+                "score": candidate.get("score"),
+                "source_tools": list(candidate.get("tools") or []),
+                "reasons": list(candidate.get("reasons") or []),
+                "primary_url": primary_url,
+                "runtime_result": runtime_result,
+                "workflow_result": workflow_result,
+                "differential_result": differential_result,
+                "focus_result": focus_result,
+                "skipped": skipped_reason is not None,
+                "skipped_reason": skipped_reason,
+            }
+        )
+
+    return followup_results
 
 
 @register_tool(sandbox_execution=False)
@@ -5602,6 +6443,23 @@ def run_security_tool_pipeline(
             run_ids=run_ids,
             max_hypotheses=max_hypotheses,
         )
+        auto_followup_results = _run_pipeline_auto_followups(
+            agent_state=agent_state,
+            logical_target=normalized_target,
+            steps=steps,
+            store=store,
+            run_ids=run_ids,
+            correlated_hypotheses=correlated_hypotheses,
+            deep=deep,
+            max_active_targets=max_active_targets,
+            max_hypotheses=max_hypotheses,
+            reuse_previous_runs=reuse_previous_runs,
+        )
+        successful_steps = [step for step in steps if step.get("success")]
+        run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
+        reused_step_count = sum(
+            1 for step in successful_steps if bool(step.get("metadata", {}).get("reused_existing_run"))
+        )
         synthesized_result = None
         if auto_synthesize_hypotheses:
             synthesized_result = synthesize_attack_hypotheses(
@@ -5623,6 +6481,8 @@ def run_security_tool_pipeline(
             "live_urls": _unique_strings(live_urls),
             "run_ids": run_ids,
             "correlated_hypothesis_count": len(correlated_hypotheses),
+            "auto_followup_count": len(auto_followup_results),
+            "auto_followup_results": auto_followup_results,
             "synthesized_hypothesis_count": (
                 int(synthesized_result.get("hypothesis_count") or 0)
                 if isinstance(synthesized_result, dict) and synthesized_result.get("success")
@@ -5657,6 +6517,7 @@ def run_security_tool_pipeline(
             "live_urls": _unique_strings(live_urls),
             "steps": steps,
             "correlated_hypotheses": correlated_hypotheses,
+            "auto_followup_results": auto_followup_results,
             "synthesized_hypotheses_result": synthesized_result,
             "evidence_result": summary_evidence,
         }
@@ -5875,6 +6736,19 @@ def run_security_tool_scan(
                     }
                     for finding in findings
                 ]
+        if normalized_tool_name in {
+            "bandit",
+            "jwt_tool",
+            "nmap",
+            "nuclei",
+            "semgrep",
+            "sqlmap",
+            "trivy",
+            "trufflehog",
+            "wapiti",
+            "zaproxy",
+        }:
+            findings = _annotate_scanner_findings(normalized_tool_name, findings)
 
         discovery_result = None
         finding_updates: list[dict[str, Any]] = []
@@ -5942,6 +6816,9 @@ def run_security_tool_scan(
                 findings=scanner_findings,
                 max_findings=max_hypotheses,
             )
+        recorded_hypothesis_count = sum(
+            1 for item in finding_updates if isinstance(item.get("hypothesis_result"), dict)
+        )
 
         run_id = _stable_id(
             "scan",
@@ -5982,7 +6859,7 @@ def run_security_tool_scan(
                 if isinstance(discovery_result, dict)
                 else 0
             ),
-            "hypothesis_seed_count": len(finding_updates) + len(parameter_hypothesis_updates),
+            "hypothesis_seed_count": recorded_hypothesis_count + len(parameter_hypothesis_updates),
             "evidence_id": evidence_result.get("evidence_id"),
         }
         store[run_id] = run_record
@@ -6067,6 +6944,8 @@ def run_security_focus_pipeline(
             "auth_jwt": ["jwt_tool", "wafw00f"],
             "ssrf_oob": ["arjun", "wafw00f"],
             "sqli": ["arjun", "sqlmap", "wapiti", "wafw00f"],
+            "xss": ["arjun", "wapiti", "zaproxy", "wafw00f"],
+            "open_redirect": ["arjun", "wafw00f"],
             "ssti": ["arjun"],
             "xxe": [],
             "file_upload": [],
@@ -6162,7 +7041,7 @@ def run_security_focus_pipeline(
             ]
         )
 
-        if normalized_focus in {"ssrf_oob", "sqli"} and not candidate_urls and (normalized_targets or url):
+        if normalized_focus in {"ssrf_oob", "sqli", "xss", "open_redirect"} and not candidate_urls and (normalized_targets or url):
             bootstrap_result = run_security_tool_pipeline(
                 agent_state=agent_state,
                 target=normalized_target,
@@ -6715,6 +7594,357 @@ def run_security_focus_pipeline(
                     result=active_probe_result,
                     metadata={
                         "focus": "sqli",
+                        "url": request_url,
+                        "parameter": parameter_name,
+                        "request_id": request_context.get("request_id"),
+                        "request_source": request_context.get("source"),
+                        "request_method": request_context.get("method"),
+                        "injection_mode": item["injection_mode"],
+                    },
+                )
+
+        elif normalized_focus == "xss":
+            suspicious_parameter_findings: list[dict[str, Any]] = []
+            seen_xss_candidates: set[tuple[str, str, str]] = set()
+
+            def add_xss_candidate(item: dict[str, Any]) -> None:
+                parameter_name = str(item.get("parameter") or "").strip()
+                candidate_url = str(item.get("url") or "").strip()
+                candidate_path = str(item.get("path") or "").strip()
+                if not parameter_name:
+                    return
+                key = (candidate_url, candidate_path, parameter_name)
+                if key in seen_xss_candidates:
+                    return
+                seen_xss_candidates.add(key)
+                suspicious_parameter_findings.append(dict(item))
+
+            for finding in _stored_findings(store, target=normalized_target):
+                parameter_name = str(finding.get("parameter") or "").strip().lower()
+                vulnerability_type = str(finding.get("vulnerability_type") or "").strip().lower()
+                if parameter_name and any(
+                    keyword in parameter_name for keyword in FOCUS_PARAMETER_HINTS["xss"]
+                ):
+                    add_xss_candidate(finding)
+                    continue
+                if vulnerability_type == "xss" and parameter_name:
+                    add_xss_candidate(finding)
+            for candidate in _request_context_parameter_candidates(runtime_entries, focus="xss"):
+                add_xss_candidate(candidate)
+            if not suspicious_parameter_findings and "arjun" in available_tools:
+                for active_url in candidate_urls[:max_active_targets]:
+                    arjun_result = run_step(
+                        "arjun",
+                        url=active_url,
+                        max_seed_items=max_hypotheses,
+                        max_hypotheses=max_hypotheses,
+                        metadata={"url": active_url},
+                    )
+                    for finding in arjun_result.get("findings", []):
+                        if any(
+                            keyword in str(finding.get("parameter") or "").strip().lower()
+                            for keyword in FOCUS_PARAMETER_HINTS["xss"]
+                        ):
+                            add_xss_candidate(finding)
+
+            probe_plans: list[dict[str, Any]] = []
+            seen_probe_plans: set[tuple[str, str, str]] = set()
+            for finding in suspicious_parameter_findings:
+                parameter_name = str(finding.get("parameter") or "").strip() or "q"
+                candidate_url = str(
+                    finding.get("url") or (candidate_urls[0] if candidate_urls else "")
+                ).strip()
+                request_contexts = _focus_request_contexts(
+                    agent_state=agent_state,
+                    target=normalized_target,
+                    candidate_url=candidate_url or None,
+                    parameter_name=parameter_name,
+                    focus="xss",
+                    max_items=1,
+                    runtime_entries=runtime_entries,
+                    workflows=discovered_workflows,
+                    session_profiles=session_profiles,
+                )
+                request_context = (
+                    request_contexts[0]
+                    if request_contexts
+                    else (
+                        _fallback_request_context(candidate_url, normalized_headers)
+                        if candidate_url
+                        else None
+                    )
+                )
+                if request_context is None:
+                    continue
+                injection_mode = _request_context_injection_mode(request_context, parameter_name)
+                plan_key = (
+                    str(request_context.get("url") or ""),
+                    parameter_name,
+                    injection_mode,
+                )
+                if plan_key in seen_probe_plans:
+                    continue
+                seen_probe_plans.add(plan_key)
+                probe_plans.append(
+                    {
+                        "parameter": parameter_name,
+                        "request_context": request_context,
+                        "injection_mode": injection_mode,
+                    }
+                )
+
+            for candidate_url in candidate_urls:
+                parsed = urlparse(candidate_url)
+                for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
+                    if not any(keyword in name.lower() for keyword in FOCUS_PARAMETER_HINTS["xss"]):
+                        continue
+                    plan_key = (candidate_url, name, "query")
+                    if plan_key in seen_probe_plans:
+                        continue
+                    seen_probe_plans.add(plan_key)
+                    probe_plans.append(
+                        {
+                            "parameter": name,
+                            "request_context": _fallback_request_context(candidate_url, normalized_headers),
+                            "injection_mode": "query",
+                        }
+                    )
+
+            if candidate_urls and "wafw00f" in available_tools:
+                focus_url = _base_url(candidate_urls[0]) or candidate_urls[0]
+                run_step("wafw00f", url=focus_url, metadata={"url": focus_url})
+
+            for item in probe_plans[:max_active_targets]:
+                parameter_name = str(item["parameter"])
+                request_context = dict(item["request_context"])
+                selected_request_contexts.append(request_context)
+                request_url = str(request_context.get("url") or "").strip()
+                request_path = urlparse(request_url).path or "/"
+                candidate_surface = (
+                    f"Potential XSS in parameter {parameter_name} on {request_path}"
+                )
+                payload_result = generate_contextual_payloads(
+                    vulnerability_type="xss",
+                    surface=candidate_surface,
+                    parameter_names=[parameter_name],
+                    max_variants=max_hypotheses * 2,
+                )
+                request_base = dict(request_context.get("base_request") or {})
+                request_base["headers"] = {
+                    **dict(request_base.get("headers") or {}),
+                    **normalized_headers,
+                }
+                active_probe_result = payload_probe_harness(
+                    agent_state=agent_state,
+                    target=normalized_target,
+                    component=f"focus:xss:{urlparse(request_url).netloc}{request_path}",
+                    surface=candidate_surface,
+                    vulnerability_type="xss",
+                    parameter_name=parameter_name,
+                    base_request=request_base,
+                    payloads=(
+                        payload_result.get("variants")
+                        if isinstance(payload_result, dict) and payload_result.get("success")
+                        else None
+                    ),
+                    semantic_matchers=["<svg", "onload=alert", "<img src=x onerror", "alert(1)"],
+                    baseline_value=(
+                        _request_context_baseline_value(
+                            request_context,
+                            parameter_name,
+                            str(item["injection_mode"]),
+                        )
+                        or _query_parameter_value(request_url, parameter_name)
+                        or "hello"
+                    ),
+                    injection_mode=str(item["injection_mode"]),
+                    max_payloads=max(1, min(max_active_targets, 4)),
+                    min_anomaly_score=3,
+                )
+                active_probe_results.append(active_probe_result)
+                _append_pipeline_step(
+                    steps,
+                    step_name="payload_probe_harness",
+                    result=active_probe_result,
+                    metadata={
+                        "focus": "xss",
+                        "url": request_url,
+                        "parameter": parameter_name,
+                        "request_id": request_context.get("request_id"),
+                        "request_source": request_context.get("source"),
+                        "request_method": request_context.get("method"),
+                        "injection_mode": item["injection_mode"],
+                    },
+                )
+
+        elif normalized_focus == "open_redirect":
+            suspicious_parameter_findings: list[dict[str, Any]] = []
+            seen_redirect_candidates: set[tuple[str, str, str]] = set()
+
+            def add_redirect_candidate(item: dict[str, Any]) -> None:
+                parameter_name = str(item.get("parameter") or "").strip()
+                candidate_url = str(item.get("url") or "").strip()
+                candidate_path = str(item.get("path") or "").strip()
+                if not parameter_name:
+                    return
+                key = (candidate_url, candidate_path, parameter_name)
+                if key in seen_redirect_candidates:
+                    return
+                seen_redirect_candidates.add(key)
+                suspicious_parameter_findings.append(dict(item))
+
+            for finding in _stored_findings(store, target=normalized_target):
+                parameter_name = str(finding.get("parameter") or "").strip().lower()
+                vulnerability_type = str(finding.get("vulnerability_type") or "").strip().lower()
+                if parameter_name and any(
+                    keyword in parameter_name for keyword in FOCUS_PARAMETER_HINTS["open_redirect"]
+                ):
+                    add_redirect_candidate(finding)
+                    continue
+                if vulnerability_type == "open_redirect" and parameter_name:
+                    add_redirect_candidate(finding)
+            for candidate in _request_context_parameter_candidates(runtime_entries, focus="open_redirect"):
+                add_redirect_candidate(candidate)
+            if not suspicious_parameter_findings and "arjun" in available_tools:
+                for active_url in candidate_urls[:max_active_targets]:
+                    arjun_result = run_step(
+                        "arjun",
+                        url=active_url,
+                        max_seed_items=max_hypotheses,
+                        max_hypotheses=max_hypotheses,
+                        metadata={"url": active_url},
+                    )
+                    for finding in arjun_result.get("findings", []):
+                        if any(
+                            keyword in str(finding.get("parameter") or "").strip().lower()
+                            for keyword in FOCUS_PARAMETER_HINTS["open_redirect"]
+                        ):
+                            add_redirect_candidate(finding)
+
+            probe_plans: list[dict[str, Any]] = []
+            seen_probe_plans: set[tuple[str, str, str]] = set()
+            for finding in suspicious_parameter_findings:
+                parameter_name = str(finding.get("parameter") or "").strip() or "next"
+                candidate_url = str(
+                    finding.get("url") or (candidate_urls[0] if candidate_urls else "")
+                ).strip()
+                request_contexts = _focus_request_contexts(
+                    agent_state=agent_state,
+                    target=normalized_target,
+                    candidate_url=candidate_url or None,
+                    parameter_name=parameter_name,
+                    focus="open_redirect",
+                    max_items=1,
+                    runtime_entries=runtime_entries,
+                    workflows=discovered_workflows,
+                    session_profiles=session_profiles,
+                )
+                request_context = (
+                    request_contexts[0]
+                    if request_contexts
+                    else (
+                        _fallback_request_context(candidate_url, normalized_headers)
+                        if candidate_url
+                        else None
+                    )
+                )
+                if request_context is None:
+                    continue
+                injection_mode = _request_context_injection_mode(request_context, parameter_name)
+                plan_key = (
+                    str(request_context.get("url") or ""),
+                    parameter_name,
+                    injection_mode,
+                )
+                if plan_key in seen_probe_plans:
+                    continue
+                seen_probe_plans.add(plan_key)
+                probe_plans.append(
+                    {
+                        "parameter": parameter_name,
+                        "request_context": request_context,
+                        "injection_mode": injection_mode,
+                    }
+                )
+
+            for candidate_url in candidate_urls:
+                parsed = urlparse(candidate_url)
+                for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
+                    if not any(
+                        keyword in name.lower() for keyword in FOCUS_PARAMETER_HINTS["open_redirect"]
+                    ):
+                        continue
+                    plan_key = (candidate_url, name, "query")
+                    if plan_key in seen_probe_plans:
+                        continue
+                    seen_probe_plans.add(plan_key)
+                    probe_plans.append(
+                        {
+                            "parameter": name,
+                            "request_context": _fallback_request_context(candidate_url, normalized_headers),
+                            "injection_mode": "query",
+                        }
+                    )
+
+            if candidate_urls and "wafw00f" in available_tools:
+                focus_url = _base_url(candidate_urls[0]) or candidate_urls[0]
+                run_step("wafw00f", url=focus_url, metadata={"url": focus_url})
+
+            for item in probe_plans[:max_active_targets]:
+                parameter_name = str(item["parameter"])
+                request_context = dict(item["request_context"])
+                selected_request_contexts.append(request_context)
+                request_url = str(request_context.get("url") or "").strip()
+                request_path = urlparse(request_url).path or "/"
+                candidate_surface = (
+                    f"Potential open redirect in parameter {parameter_name} on {request_path}"
+                )
+                payload_result = generate_contextual_payloads(
+                    vulnerability_type="open_redirect",
+                    surface=candidate_surface,
+                    parameter_names=[parameter_name],
+                    max_variants=max_hypotheses * 2,
+                )
+                request_base = dict(request_context.get("base_request") or {})
+                request_base["headers"] = {
+                    **dict(request_base.get("headers") or {}),
+                    **normalized_headers,
+                }
+                active_probe_result = payload_probe_harness(
+                    agent_state=agent_state,
+                    target=normalized_target,
+                    component=f"focus:open_redirect:{urlparse(request_url).netloc}{request_path}",
+                    surface=candidate_surface,
+                    vulnerability_type="open_redirect",
+                    parameter_name=parameter_name,
+                    base_request=request_base,
+                    payloads=(
+                        payload_result.get("variants")
+                        if isinstance(payload_result, dict) and payload_result.get("success")
+                        else None
+                    ),
+                    semantic_matchers=["https://evil.example/landing", "//evil.example/landing", "/admin", "/internal/debug"],
+                    baseline_value=(
+                        _request_context_baseline_value(
+                            request_context,
+                            parameter_name,
+                            str(item["injection_mode"]),
+                        )
+                        or _query_parameter_value(request_url, parameter_name)
+                        or "/dashboard"
+                    ),
+                    injection_mode=str(item["injection_mode"]),
+                    max_payloads=max(1, min(max_active_targets, 4)),
+                    follow_redirects=False,
+                    min_anomaly_score=3,
+                )
+                active_probe_results.append(active_probe_result)
+                _append_pipeline_step(
+                    steps,
+                    step_name="payload_probe_harness",
+                    result=active_probe_result,
+                    metadata={
+                        "focus": "open_redirect",
                         "url": request_url,
                         "parameter": parameter_name,
                         "request_id": request_context.get("request_id"),

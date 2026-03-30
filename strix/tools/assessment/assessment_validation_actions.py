@@ -629,6 +629,22 @@ def _default_semantic_markers_for_type(vulnerability_type: str) -> list[str]:
             "el1008e",
             "template error",
         ]
+    if normalized == "xss":
+        return [
+            "<svg",
+            "onload=alert",
+            "<img",
+            "onerror=alert",
+            "constructor.constructor",
+            "alert(1)",
+        ]
+    if normalized == "open_redirect":
+        return [
+            "https://evil.example/landing",
+            "//evil.example/landing",
+            "/admin",
+            "/internal/debug",
+        ]
     if normalized == "xxe":
         return [
             "xml parser",

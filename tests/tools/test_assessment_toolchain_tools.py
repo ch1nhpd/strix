@@ -19,9 +19,12 @@ from strix.tools.agents_graph import agents_graph_actions
 from strix.tools.assessment import clear_assessment_storage, list_assessment_state
 from strix.tools.assessment import assessment_browser_actions as browser_assessment_actions
 from strix.tools.assessment import assessment_creative_actions as creative_actions
+from strix.tools.assessment import assessment_hunt_actions as hunt_actions
 from strix.tools.assessment import assessment_oob_actions as oob_actions
+from strix.tools.assessment import assessment_runtime_actions as runtime_actions
 from strix.tools.assessment import assessment_toolchain_actions as toolchain_actions
 from strix.tools.assessment import assessment_validation_actions as validation_actions
+from strix.tools.assessment import assessment_workflow_actions as workflow_actions
 from strix.tools.executor import execute_tool_invocation
 
 
@@ -500,6 +503,41 @@ def test_run_security_tool_scan_nuclei_creates_hypothesis_and_coverage(monkeypat
     assert any(item["vulnerability_type"] == "authentication" for item in ledger["hypotheses"])
 
 
+def test_run_security_tool_scan_nuclei_downgrades_low_signal_template(monkeypatch: Any) -> None:
+    _patch_scan(
+        monkeypatch,
+        tool_output=json.dumps(
+            {
+                "template-id": "tech-detect",
+                "matched-at": "https://app.test/",
+                "host": "app.test",
+                "info": {
+                    "severity": "low",
+                    "name": "Modern Web Application",
+                    "tags": ["tech", "fingerprint"],
+                },
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_scan(
+        agent_state=state,
+        tool_name="nuclei",
+        target="web",
+        targets=["https://app.test"],
+        automatic_scan=True,
+        include_findings=True,
+    )
+    ledger = list_assessment_state(agent_state=state)
+
+    assert result["success"] is True
+    assert result["hypothesis_seed_count"] == 0
+    assert result["findings"][0]["triage"]["confidence"] == "low"
+    assert result["findings"][0]["triage"]["should_record_hypothesis"] is False
+    assert ledger["hypotheses"] == []
+
+
 def test_run_security_tool_scan_ffuf_seeds_hidden_path_coverage(monkeypatch: Any) -> None:
     _patch_scan(
         monkeypatch,
@@ -945,6 +983,242 @@ def test_run_security_tool_pipeline_reuses_prior_scope_runs(monkeypatch: Any) ->
     assert second["success"] is True
     assert call_count["scan"] == 1
     assert second["reused_step_count"] == 1
+
+
+def test_run_security_tool_pipeline_auto_escalates_authz_followups(
+    monkeypatch: Any,
+) -> None:
+    runtime_calls: list[dict[str, Any]] = []
+    hunt_calls: list[dict[str, Any]] = []
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [
+                {"tool_name": "httpx", "available": True, "executable": "httpx"},
+                {"tool_name": "arjun", "available": True, "executable": "arjun"},
+            ],
+        },
+    )
+
+    def fake_run_security_tool_scan(
+        agent_state: Any,
+        tool_name: str,
+        target: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        findings: list[dict[str, Any]] = []
+        discovery_seed_count = 0
+        if tool_name == "httpx":
+            findings = [{"url": "https://app.test/api/orders/123", "status_code": 200}]
+            discovery_seed_count = 1
+        elif tool_name == "arjun":
+            findings = [
+                {
+                    "url": "https://app.test/api/orders/123?id=1",
+                    "path": "/api/orders/123",
+                    "parameter": "id",
+                }
+            ]
+            discovery_seed_count = 1
+        root_agent_id, store = toolchain_actions._get_tool_store(agent_state)
+        store[f"run_{tool_name}"] = {
+            "root_agent_id": root_agent_id,
+            "run_id": f"run_{tool_name}",
+            "tool_name": tool_name,
+            "target": target,
+            "findings": findings,
+            "updated_at": "2026-03-30T00:00:00Z",
+        }
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": len(findings),
+            "discovery_seed_count": discovery_seed_count,
+            "hypothesis_seed_count": 0,
+            "findings": findings,
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: object())
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: [
+            {"name": "admin", "role": "admin", "host": "app.test"},
+            {"name": "user", "role": "user", "host": "app.test"},
+        ],
+    )
+    monkeypatch.setattr(
+        runtime_actions,
+        "map_runtime_surface",
+        lambda *args, **kwargs: (
+            runtime_calls.append(kwargs)
+            or {"success": True, "tool_name": "map_runtime_surface", "inventory_count": 1}
+        ),
+    )
+    monkeypatch.setattr(
+        hunt_actions,
+        "run_inventory_differential_hunt",
+        lambda *args, **kwargs: (
+            hunt_calls.append(kwargs)
+            or {
+                "success": True,
+                "tool_name": "run_inventory_differential_hunt",
+                "finding_count": 1,
+                "suspicious_count": 1,
+                "critical_impact_count": 1,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {"success": True, "focus": kwargs["focus"], "step_count": 1}
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        deep=True,
+        max_active_targets=1,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert runtime_calls[0]["target"] == "web"
+    assert hunt_calls[0]["target"] == "web"
+    assert focus_calls[0]["focus"] == "authz"
+    assert focus_calls[0]["url"] == "https://app.test/api/orders/123"
+    assert result["auto_followup_results"][0]["focus"] == "authz"
+    assert result["auto_followup_results"][0]["skipped"] is False
+    assert any(step["step"] == "map_runtime_surface" for step in result["steps"])
+    assert any(step["step"] == "run_inventory_differential_hunt" for step in result["steps"])
+    assert any(step["step"] == "focus:authz" for step in result["steps"])
+
+
+def test_run_security_tool_pipeline_auto_escalates_workflow_race_followup(
+    monkeypatch: Any,
+) -> None:
+    workflow_calls: list[dict[str, Any]] = []
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [
+                {"tool_name": "httpx", "available": True, "executable": "httpx"},
+                {"tool_name": "arjun", "available": True, "executable": "arjun"},
+            ],
+        },
+    )
+
+    def fake_run_security_tool_scan(
+        agent_state: Any,
+        tool_name: str,
+        target: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        findings: list[dict[str, Any]] = []
+        discovery_seed_count = 0
+        if tool_name == "httpx":
+            findings = [{"url": "https://app.test/coupon/redeem", "status_code": 200}]
+            discovery_seed_count = 1
+        elif tool_name == "arjun":
+            findings = [
+                {
+                    "url": "https://app.test/coupon/redeem?coupon=SAVE50",
+                    "path": "/coupon/redeem",
+                    "parameter": "coupon",
+                }
+            ]
+            discovery_seed_count = 1
+        root_agent_id, store = toolchain_actions._get_tool_store(agent_state)
+        store[f"run_{tool_name}"] = {
+            "root_agent_id": root_agent_id,
+            "run_id": f"run_{tool_name}",
+            "tool_name": tool_name,
+            "target": target,
+            "findings": findings,
+            "updated_at": "2026-03-30T00:00:00Z",
+        }
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": len(findings),
+            "discovery_seed_count": discovery_seed_count,
+            "hypothesis_seed_count": 0,
+            "findings": findings,
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: object())
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        workflow_actions,
+        "discover_workflows_from_requests",
+        lambda *args, **kwargs: (
+            workflow_calls.append(kwargs)
+            or {"success": True, "tool_name": "discover_workflows_from_requests", "workflow_count": 1}
+        ),
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {"success": True, "focus": kwargs["focus"], "step_count": 1}
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        deep=True,
+        max_active_targets=1,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert workflow_calls[0]["target"] == "web"
+    assert focus_calls[0]["focus"] == "workflow_race"
+    assert focus_calls[0]["url"] == "https://app.test/coupon/redeem"
+    assert result["auto_followup_results"][0]["focus"] == "workflow_race"
+    assert result["auto_followup_results"][0]["skipped"] is False
+    assert any(step["step"] == "discover_workflows_from_requests" for step in result["steps"])
+    assert any(step["step"] == "focus:workflow_race" for step in result["steps"])
 
 
 def test_run_security_focus_pipeline_auth_jwt_uses_specialized_steps(monkeypatch: Any) -> None:
@@ -1715,6 +1989,155 @@ def test_run_security_focus_pipeline_path_traversal_uses_payload_probe(monkeypat
     assert probe_calls[0]["parameter_name"] == "file"
     assert probe_calls[0]["injection_mode"] == "query"
     assert probe_calls[0]["baseline_value"] == "report.pdf"
+
+
+def test_run_security_focus_pipeline_xss_uses_payload_probe(monkeypatch: Any) -> None:
+    probe_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_runtime_inventory_entries",
+        lambda agent_state, target: [
+            {
+                "host": "app.test",
+                "priority": "high",
+                "sample_urls": ["https://app.test/search?q=report"],
+                "sample_request_ids": ["req_xss"],
+                "methods": ["GET"],
+                "query_params": ["q"],
+                "body_params": [],
+                "content_types": ["text/html"],
+                "auth_hints": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_get_focus_proxy_manager",
+        lambda: StaticProxyManager(
+            {
+                "req_xss": (
+                    "GET /search?q=report HTTP/1.1\n"
+                    "Host: app.test\n"
+                    "Accept: text/html\n"
+                    "\n"
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        validation_actions,
+        "payload_probe_harness",
+        lambda *args, **kwargs: (
+            probe_calls.append(kwargs)
+            or {
+                "success": True,
+                "tool_name": "payload_probe_harness",
+                "finding_count": 1,
+                "triage_result": {"suspicious_observations": [{"name": "variant_1"}]},
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="web",
+        focus="xss",
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert probe_calls[0]["vulnerability_type"] == "xss"
+    assert probe_calls[0]["parameter_name"] == "q"
+    assert probe_calls[0]["injection_mode"] == "query"
+    assert probe_calls[0]["baseline_value"] == "report"
+
+
+def test_run_security_focus_pipeline_open_redirect_uses_payload_probe(monkeypatch: Any) -> None:
+    probe_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_runtime_inventory_entries",
+        lambda agent_state, target: [
+            {
+                "host": "app.test",
+                "priority": "high",
+                "sample_urls": ["https://app.test/login?next=%2Fhome"],
+                "sample_request_ids": ["req_redirect"],
+                "methods": ["GET"],
+                "query_params": ["next"],
+                "body_params": [],
+                "content_types": ["text/html"],
+                "auth_hints": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_get_focus_proxy_manager",
+        lambda: StaticProxyManager(
+            {
+                "req_redirect": (
+                    "GET /login?next=%2Fhome HTTP/1.1\n"
+                    "Host: app.test\n"
+                    "Accept: text/html\n"
+                    "\n"
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        validation_actions,
+        "payload_probe_harness",
+        lambda *args, **kwargs: (
+            probe_calls.append(kwargs)
+            or {
+                "success": True,
+                "tool_name": "payload_probe_harness",
+                "finding_count": 1,
+                "triage_result": {"suspicious_observations": [{"name": "variant_1"}]},
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="web",
+        focus="open_redirect",
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert probe_calls[0]["vulnerability_type"] == "open_redirect"
+    assert probe_calls[0]["parameter_name"] == "next"
+    assert probe_calls[0]["injection_mode"] == "query"
+    assert probe_calls[0]["baseline_value"] == "/home"
+    assert probe_calls[0]["follow_redirects"] is False
 
 
 def test_run_security_focus_pipeline_ssti_uses_payload_probe(monkeypatch: Any) -> None:

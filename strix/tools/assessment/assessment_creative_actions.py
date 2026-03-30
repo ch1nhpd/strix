@@ -169,7 +169,7 @@ def _vulnerability_type_for_issue(issue_type: str) -> str:
         "authorization_parity": "authorization",
         "dangerous_variant_acceptance": "anomaly",
         "timing_oracle": "side_channel",
-        "sensitive_redirect": "business_logic",
+        "sensitive_redirect": "open_redirect",
         "length_outlier": "anomaly",
     }.get(issue_type, "anomaly")
 
@@ -514,12 +514,53 @@ def _payload_variants_for_type(
             payloads.append({"payload": payload, "strategy": "syntax_and_time_based"})
     elif vulnerability_type == "xss":
         for payload in [
-            "<svg/onload=alert(1)>",
-            "\"><svg/onload=alert(1)>",
-            "<img src=x onerror=alert(document.domain)>",
-            "{{constructor.constructor('alert(1)')()}}",
+            {
+                "payload": "<svg/onload=alert(1)>",
+                "strategy": "dom_and_template_xss",
+                "expected_markers": ["<svg", "onload=alert(1)", "alert(1)"],
+            },
+            {
+                "payload": "\"><svg/onload=alert(1)>",
+                "strategy": "dom_breakout_xss",
+                "expected_markers": ["<svg", "onload=alert(1)", "alert(1)"],
+            },
+            {
+                "payload": "<img src=x onerror=alert(document.domain)>",
+                "strategy": "img_onerror_xss",
+                "expected_markers": ["<img", "onerror=alert", "document.domain"],
+            },
+            {
+                "payload": "{{constructor.constructor('alert(1)')()}}",
+                "strategy": "template_gadget_xss",
+                "expected_markers": ["constructor.constructor", "alert(1)"],
+            },
         ]:
-            payloads.append({"payload": payload, "strategy": "dom_and_template_xss"})
+            payloads.append(payload)
+    elif vulnerability_type == "open_redirect":
+        payloads.extend(
+            [
+                {
+                    "payload": "https://evil.example/landing",
+                    "strategy": "absolute_external_redirect",
+                    "expected_markers": ["https://evil.example/landing"],
+                },
+                {
+                    "payload": "//evil.example/landing",
+                    "strategy": "scheme_relative_redirect",
+                    "expected_markers": ["//evil.example/landing"],
+                },
+                {
+                    "payload": "/admin",
+                    "strategy": "sensitive_internal_redirect",
+                    "expected_markers": ["/admin"],
+                },
+                {
+                    "payload": "/internal/debug",
+                    "strategy": "debug_redirect",
+                    "expected_markers": ["/internal/debug"],
+                },
+            ]
+        )
     elif vulnerability_type == "ssrf":
         base_payloads = [
             "http://169.254.169.254/latest/meta-data/",
@@ -781,6 +822,10 @@ def triage_attack_anomalies(
             ):
                 score += 4
                 issue_types.append("timing_oracle")
+
+            if item["location"] and item["reflection_detected"]:
+                score += 5
+                issue_types.append("sensitive_redirect")
 
             if item["location"] and any(
                 marker in item["location"].lower() for marker in ["/admin", "/internal", "/debug"]
