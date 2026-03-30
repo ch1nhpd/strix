@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import types
@@ -21,6 +22,7 @@ from strix.tools.assessment import assessment_creative_actions as creative_actio
 from strix.tools.assessment import assessment_oob_actions as oob_actions
 from strix.tools.assessment import assessment_toolchain_actions as toolchain_actions
 from strix.tools.assessment import assessment_validation_actions as validation_actions
+from strix.tools.executor import execute_tool_invocation
 
 
 class DummyState:
@@ -258,6 +260,45 @@ def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -
     surfaces = {item["surface"] for item in ledger["coverage"]}
     assert "Discovered path /admin" in surfaces
     assert "Discovered path /api/orders/123" in surfaces
+
+
+def test_execute_tool_invocation_allows_tool_args_named_tool_name(
+    monkeypatch: Any,
+) -> None:
+    _patch_scan(
+        monkeypatch,
+        tool_output=json.dumps(
+            {
+                "url": "https://accounts.opera.com/security.txt",
+                "status": 200,
+                "length": 0,
+                "words": 0,
+                "lines": 0,
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = asyncio.run(
+        execute_tool_invocation(
+            {
+                "toolName": "run_security_tool_scan",
+                "args": {
+                    "tool_name": "ffuf",
+                    "target": "https://accounts.opera.com",
+                    "component": "runtime:path-discovery",
+                    "url": "https://accounts.opera.com/FUZZ",
+                    "wordlist_path": "/usr/share/wordlists/dirb/common.txt",
+                    "include_findings": True,
+                },
+            },
+            agent_state=state,
+        )
+    )
+
+    assert isinstance(result, dict)
+    assert result["success"] is True
+    assert result["tool_name"] == "ffuf"
 
 
 def test_run_security_tool_scan_katana_seeds_crawled_paths(monkeypatch: Any) -> None:

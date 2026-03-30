@@ -26,17 +26,19 @@ SANDBOX_EXECUTION_TIMEOUT = _SERVER_TIMEOUT + 30
 SANDBOX_CONNECT_TIMEOUT = float(Config.get("strix_sandbox_connect_timeout") or "10")
 
 
-async def execute_tool(tool_name: str, agent_state: Any | None = None, **kwargs: Any) -> Any:
-    execute_in_sandbox = should_execute_in_sandbox(tool_name)
+async def execute_tool(invoked_tool_name: str, agent_state: Any | None = None, **kwargs: Any) -> Any:
+    execute_in_sandbox = should_execute_in_sandbox(invoked_tool_name)
     sandbox_mode = os.getenv("STRIX_SANDBOX_MODE", "false").lower() == "true"
 
     if execute_in_sandbox and not sandbox_mode:
-        return await _execute_tool_in_sandbox(tool_name, agent_state, **kwargs)
+        return await _execute_tool_in_sandbox(invoked_tool_name, agent_state, **kwargs)
 
-    return await _execute_tool_locally(tool_name, agent_state, **kwargs)
+    return await _execute_tool_locally(invoked_tool_name, agent_state, **kwargs)
 
 
-async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: Any) -> Any:
+async def _execute_tool_in_sandbox(
+    invoked_tool_name: str, agent_state: Any, **kwargs: Any
+) -> Any:
     if not hasattr(agent_state, "sandbox_id") or not agent_state.sandbox_id:
         raise ValueError("Agent state with a valid sandbox_id is required for sandbox execution.")
 
@@ -62,7 +64,7 @@ async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: A
 
     request_data = {
         "agent_id": agent_id,
-        "tool_name": tool_name,
+        "tool_name": invoked_tool_name,
         "kwargs": kwargs,
     }
 
@@ -84,30 +86,40 @@ async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: A
             response.raise_for_status()
             response_data = response.json()
             if response_data.get("error"):
-                posthog.error("tool_execution_error", f"{tool_name}: {response_data['error']}")
+                posthog.error(
+                    "tool_execution_error",
+                    f"{invoked_tool_name}: {response_data['error']}",
+                )
                 raise RuntimeError(f"Sandbox execution error: {response_data['error']}")
             return response_data.get("result")
         except httpx.HTTPStatusError as e:
-            posthog.error("tool_http_error", f"{tool_name}: HTTP {e.response.status_code}")
+            posthog.error(
+                "tool_http_error",
+                f"{invoked_tool_name}: HTTP {e.response.status_code}",
+            )
             if e.response.status_code == 401:
                 raise RuntimeError("Authentication failed: Invalid or missing sandbox token") from e
             raise RuntimeError(f"HTTP error calling tool server: {e.response.status_code}") from e
         except httpx.RequestError as e:
             error_type = type(e).__name__
-            posthog.error("tool_request_error", f"{tool_name}: {error_type}")
+            posthog.error("tool_request_error", f"{invoked_tool_name}: {error_type}")
             raise RuntimeError(f"Request error calling tool server: {error_type}") from e
 
 
-async def _execute_tool_locally(tool_name: str, agent_state: Any | None, **kwargs: Any) -> Any:
-    tool_func = get_tool_by_name(tool_name)
+async def _execute_tool_locally(
+    invoked_tool_name: str, agent_state: Any | None, **kwargs: Any
+) -> Any:
+    tool_func = get_tool_by_name(invoked_tool_name)
     if not tool_func:
-        raise ValueError(f"Tool '{tool_name}' not found")
+        raise ValueError(f"Tool '{invoked_tool_name}' not found")
 
     converted_kwargs = convert_arguments(tool_func, kwargs)
 
-    if needs_agent_state(tool_name):
+    if needs_agent_state(invoked_tool_name):
         if agent_state is None:
-            raise ValueError(f"Tool '{tool_name}' requires agent_state but none was provided.")
+            raise ValueError(
+                f"Tool '{invoked_tool_name}' requires agent_state but none was provided."
+            )
         result = tool_func(agent_state=agent_state, **converted_kwargs)
     else:
         result = tool_func(**converted_kwargs)
@@ -163,34 +175,34 @@ def _format_schema_hint(tool_name: str, required: set[str], optional: set[str]) 
 
 
 async def execute_tool_with_validation(
-    tool_name: str | None, agent_state: Any | None = None, **kwargs: Any
+    invoked_tool_name: str | None, agent_state: Any | None = None, **kwargs: Any
 ) -> Any:
-    is_valid, error_msg = validate_tool_availability(tool_name)
+    is_valid, error_msg = validate_tool_availability(invoked_tool_name)
     if not is_valid:
         return f"Error: {error_msg}"
 
-    assert tool_name is not None
+    assert invoked_tool_name is not None
 
-    arg_error = _validate_tool_arguments(tool_name, kwargs)
+    arg_error = _validate_tool_arguments(invoked_tool_name, kwargs)
     if arg_error:
         return f"Error: {arg_error}"
 
     try:
-        result = await execute_tool(tool_name, agent_state, **kwargs)
+        result = await execute_tool(invoked_tool_name, agent_state, **kwargs)
     except Exception as e:  # noqa: BLE001
         error_str = str(e)
         if len(error_str) > 500:
             error_str = error_str[:500] + "... [truncated]"
-        return f"Error executing {tool_name}: {error_str}"
+        return f"Error executing {invoked_tool_name}: {error_str}"
     else:
         return result
 
 
 async def execute_tool_invocation(tool_inv: dict[str, Any], agent_state: Any | None = None) -> Any:
-    tool_name = tool_inv.get("toolName")
+    invoked_tool_name = tool_inv.get("toolName")
     tool_args = tool_inv.get("args", {})
 
-    return await execute_tool_with_validation(tool_name, agent_state, **tool_args)
+    return await execute_tool_with_validation(invoked_tool_name, agent_state, **tool_args)
 
 
 def _check_error_result(result: Any) -> tuple[bool, Any]:
