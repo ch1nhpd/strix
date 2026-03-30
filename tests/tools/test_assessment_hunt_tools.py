@@ -111,7 +111,15 @@ def test_run_inventory_differential_hunt_builds_cases_from_inventory_and_session
         captured_calls.append(kwargs)
         return {
             "success": True,
-            "suspicious_observations": [{"issue_type": "role_based_access"}],
+            "suspicious_observations": [
+                {
+                    "issue_type": "role_based_access",
+                    "impact_level": "critical",
+                    "impact_category": "privileged_action",
+                    "confidence": "high",
+                    "parity_score": 10,
+                }
+            ],
         }
 
     monkeypatch.setattr(hunt_actions, "analyze_differential_access", fake_analyze_differential_access)
@@ -143,6 +151,10 @@ def test_run_inventory_differential_hunt_builds_cases_from_inventory_and_session
     assert result["success"] is True
     assert result["executed_count"] == 1
     assert result["suspicious_observation_count"] == 1
+    assert result["critical_impact_count"] == 1
+    assert result["executed"][0]["top_impact_level"] == "critical"
+    assert result["executed"][0]["top_impact_category"] == "privileged_action"
+    assert result["executed"][0]["top_confidence"] == "high"
     assert len(captured_calls) == 1
     assert captured_calls[0]["surface"] == "Runtime endpoint GET /api/orders/:id"
     assert captured_calls[0]["baseline_case"] == "admin"

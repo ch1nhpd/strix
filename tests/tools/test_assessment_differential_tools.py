@@ -102,6 +102,81 @@ def test_analyze_differential_access_records_cross_tenant_parity(monkeypatch: An
     assert result["success"] is True
     assert result["suspicious_observations"]
     assert result["suspicious_observations"][0]["issue_type"] == "cross_tenant_access"
+    assert result["suspicious_observations"][0]["impact_category"] == "cross_tenant_data"
+    assert result["suspicious_observations"][0]["impact_level"] == "critical"
+    assert result["suspicious_observations"][0]["confidence"] == "high"
     assert result["coverage_result"]["record"]["status"] == "in_progress"
     assert ledger["assessment_summary"]["hypothesis_total"] == 1
     assert ledger["assessment_summary"]["evidence_total"] == 1
+
+
+def test_analyze_differential_access_ignores_low_signal_success_without_parity(
+    monkeypatch: Any,
+) -> None:
+    responses = {
+        "owner_allow": {
+            "name": "owner_allow",
+            "method": "GET",
+            "url": "https://app.test/orders/123",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_length": 32,
+            "body_hash": "ownerhash",
+            "body_preview": '{"id":123,"tenant":"a"}',
+            "elapsed_ms": 10,
+        },
+        "other_tenant_deny": {
+            "name": "other_tenant_deny",
+            "method": "GET",
+            "url": "https://app.test/orders/123",
+            "status_code": 200,
+            "content_type": "text/html",
+            "body_length": 18,
+            "body_hash": "denyhash",
+            "body_preview": "<html>blocked</html>",
+            "elapsed_ms": 12,
+        },
+    }
+
+    monkeypatch.setattr(
+        differential_actions,
+        "_execute_request",
+        lambda spec, timeout, follow_redirects: responses[spec["name"]],
+    )
+
+    state = DummyState("agent_root")
+    result = differential_actions.analyze_differential_access(
+        agent_state=state,
+        target="web",
+        component="orders",
+        surface="Order differential access",
+        method="GET",
+        url="https://app.test/orders/123",
+        baseline_case="owner_allow",
+        cases=[
+            {
+                "name": "owner_allow",
+                "method": "GET",
+                "url": "https://app.test/orders/123",
+                "expected_access": "allow",
+                "role": "owner",
+                "tenant": "tenant-a",
+                "ownership": "owner",
+                "object_ref": "order-123",
+            },
+            {
+                "name": "other_tenant_deny",
+                "method": "GET",
+                "url": "https://app.test/orders/123",
+                "expected_access": "deny",
+                "role": "user",
+                "tenant": "tenant-b",
+                "ownership": "other",
+                "object_ref": "order-123",
+            },
+        ],
+    )
+
+    assert result["success"] is True
+    assert result["suspicious_observations"] == []
+    assert result["coverage_result"]["record"]["status"] == "covered"

@@ -24,6 +24,8 @@ ROLE_KEYWORDS = [
     ("unauth", 0),
 ]
 PRIORITY_ORDER = {"critical": 0, "high": 1, "normal": 2, "low": 3}
+IMPACT_RANK = {"critical": 3, "high": 2, "normal": 1, "low": 0}
+CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
 
 
 def _role_rank(profile: dict[str, Any]) -> int:
@@ -97,6 +99,23 @@ def _case_for_profile(
     else:
         case["url"] = url
     return case
+
+
+def _top_suspicious_observation(result: dict[str, Any]) -> dict[str, Any] | None:
+    suspicious = [
+        item for item in list(result.get("suspicious_observations") or []) if isinstance(item, dict)
+    ]
+    if not suspicious:
+        return None
+    suspicious.sort(
+        key=lambda item: (
+            IMPACT_RANK.get(str(item.get("impact_level") or "low"), 0),
+            CONFIDENCE_RANK.get(str(item.get("confidence") or "low"), 0),
+            int(item.get("parity_score") or 0),
+        ),
+        reverse=True,
+    )
+    return suspicious[0]
 
 
 @register_tool(sandbox_execution=False)
@@ -246,6 +265,7 @@ def run_inventory_differential_hunt(
         executed: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         suspicious_count = 0
+        critical_impact_count = 0
         for candidate in candidates[:max_endpoints]:
             result = analyze_differential_access(
                 agent_state=agent_state,
@@ -269,6 +289,9 @@ def run_inventory_differential_hunt(
                 continue
             suspicious_matches = len(result.get("suspicious_observations", []))
             suspicious_count += suspicious_matches
+            top_observation = _top_suspicious_observation(result)
+            if top_observation and str(top_observation.get("impact_level") or "") == "critical":
+                critical_impact_count += 1
             executed.append(
                 {
                     "surface": candidate["surface"],
@@ -276,8 +299,32 @@ def run_inventory_differential_hunt(
                     "method": candidate["method"],
                     "case_count": len(candidate["cases"]),
                     "suspicious_observations": suspicious_matches,
+                    "top_impact_level": (
+                        top_observation.get("impact_level")
+                        if isinstance(top_observation, dict)
+                        else None
+                    ),
+                    "top_impact_category": (
+                        top_observation.get("impact_category")
+                        if isinstance(top_observation, dict)
+                        else None
+                    ),
+                    "top_confidence": (
+                        top_observation.get("confidence")
+                        if isinstance(top_observation, dict)
+                        else None
+                    ),
                 }
             )
+
+        executed.sort(
+            key=lambda item: (
+                IMPACT_RANK.get(str(item.get("top_impact_level") or "low"), 0),
+                CONFIDENCE_RANK.get(str(item.get("top_confidence") or "low"), 0),
+                int(item.get("suspicious_observations") or 0),
+            ),
+            reverse=True,
+        )
 
         if not executed and not skipped:
             return {
@@ -290,7 +337,8 @@ def run_inventory_differential_hunt(
             title=f"Inventory differential hunt summary for {target}",
             details=(
                 f"Executed {len(executed)} runtime differential comparison(s); "
-                f"{suspicious_count} suspicious observation(s); {len(skipped)} skipped."
+                f"{suspicious_count} suspicious observation(s); "
+                f"{critical_impact_count} critical-impact candidate(s); {len(skipped)} skipped."
             ),
             source="tool",
             target=target,
@@ -304,6 +352,7 @@ def run_inventory_differential_hunt(
             "success": True,
             "executed_count": len(executed),
             "suspicious_observation_count": suspicious_count,
+            "critical_impact_count": critical_impact_count,
             "executed": executed,
             "skipped": skipped,
             "evidence_result": summary_evidence,

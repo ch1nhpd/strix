@@ -1,5 +1,6 @@
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from strix.tools.registry import register_tool
 
@@ -14,6 +15,51 @@ from .assessment_validation_actions import (
 
 
 VALID_EXPECTED_ACCESS = {"allow", "deny", "unknown"}
+PRIORITY_RANK = {"low": 0, "normal": 1, "high": 2, "critical": 3}
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+FINANCIAL_KEYWORDS = (
+    "billing",
+    "cart",
+    "checkout",
+    "coupon",
+    "invoice",
+    "order",
+    "payment",
+    "plan",
+    "redeem",
+    "refund",
+    "subscription",
+    "transfer",
+    "wallet",
+    "withdraw",
+)
+ACCOUNT_KEYWORDS = (
+    "account",
+    "credential",
+    "email",
+    "login",
+    "mfa",
+    "otp",
+    "passkey",
+    "password",
+    "profile",
+    "reset",
+    "session",
+    "token",
+)
+PRIVILEGED_KEYWORDS = (
+    "admin",
+    "approve",
+    "config",
+    "invite",
+    "member",
+    "permission",
+    "role",
+    "setting",
+    "staff",
+    "user",
+)
 
 
 def _normalize_access_case(agent_state: Any, item: dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +98,206 @@ def _issue_type(deltas: list[str]) -> str:
     return "differential_access"
 
 
+def _status_family(status_code: Any) -> int | None:
+    try:
+        value = int(status_code or 0)
+    except (TypeError, ValueError):
+        return None
+    return value // 100 if value >= 100 else None
+
+
+def _body_lengths_close(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    try:
+        left_length = int(left.get("body_length") or 0)
+        right_length = int(right.get("body_length") or 0)
+    except (TypeError, ValueError):
+        return False
+    if left_length <= 0 or right_length <= 0:
+        return False
+    delta = abs(left_length - right_length)
+    return delta <= max(64, int(max(left_length, right_length) * 0.1))
+
+
+def _parity_evidence(
+    candidate_result: dict[str, Any],
+    baseline_result: dict[str, Any],
+    *,
+    similarity_threshold: float,
+) -> dict[str, Any]:
+    matches, ratio = _responses_match(candidate_result, baseline_result, similarity_threshold)
+    same_body_hash = (
+        bool(candidate_result.get("body_hash"))
+        and candidate_result.get("body_hash") == baseline_result.get("body_hash")
+    )
+    candidate_location = str(candidate_result.get("location") or "").strip().lower()
+    baseline_location = str(baseline_result.get("location") or "").strip().lower()
+    same_location = bool(candidate_location and candidate_location == baseline_location)
+    same_status = candidate_result.get("status_code") == baseline_result.get("status_code")
+    same_status_family = (
+        _status_family(candidate_result.get("status_code"))
+        == _status_family(baseline_result.get("status_code"))
+        and _status_family(candidate_result.get("status_code")) is not None
+    )
+    same_content_type = (
+        str(candidate_result.get("content_type") or "").strip().lower()
+        == str(baseline_result.get("content_type") or "").strip().lower()
+    )
+    length_close = _body_lengths_close(candidate_result, baseline_result)
+    both_success = bool(candidate_result.get("status_code")) and bool(baseline_result.get("status_code"))
+
+    score = 0
+    reasons: list[str] = []
+    if same_body_hash:
+        score += 6
+        reasons.append("same_body_hash")
+    elif matches:
+        score += 4
+        reasons.append("high_preview_similarity")
+    if same_status:
+        score += 2
+        reasons.append("same_status")
+    elif same_status_family:
+        score += 1
+        reasons.append("same_status_family")
+    if same_location:
+        score += 3
+        reasons.append("same_location")
+    if same_content_type:
+        score += 1
+        reasons.append("same_content_type")
+    if length_close:
+        score += 1
+        reasons.append("similar_body_length")
+    if both_success:
+        score += 1
+        reasons.append("both_success")
+
+    if score >= 9 or same_body_hash:
+        confidence = "high"
+    elif score >= 6:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    return {
+        "score": score,
+        "confidence": confidence,
+        "reasons": reasons,
+        "primary_parity": bool(same_body_hash or matches or same_location),
+        "matched_response": matches,
+        "similarity": round(ratio, 3),
+        "same_status": same_status,
+        "same_location": same_location,
+        "same_content_type": same_content_type,
+        "same_body_hash": same_body_hash,
+        "length_close": length_close,
+    }
+
+
+def _contains_keyword(blob: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in blob for keyword in keywords)
+
+
+def _impact_assessment(
+    *,
+    method: str,
+    url: str,
+    deltas: list[str],
+    issue_type: str,
+    case: dict[str, Any],
+    baseline: dict[str, Any],
+) -> dict[str, str]:
+    normalized_method = str(method).strip().upper()
+    state_changing = normalized_method in STATE_CHANGING_METHODS
+    path_blob = " ".join(
+        [
+            urlparse(str(url or "")).path.lower(),
+            str(case.get("actor") or case.get("name") or "").lower(),
+            str(baseline.get("actor") or baseline.get("name") or "").lower(),
+            str(case.get("role") or "").lower(),
+            str(baseline.get("role") or "").lower(),
+        ]
+    )
+
+    if issue_type == "cross_tenant_access":
+        if state_changing:
+            return {
+                "impact_category": "cross_tenant_action",
+                "impact_level": "critical",
+                "impact_rationale": (
+                    "A lower-trust actor appears able to perform a state-changing action across tenant boundaries."
+                ),
+            }
+        return {
+            "impact_category": "cross_tenant_data",
+            "impact_level": "critical",
+            "impact_rationale": (
+                "A lower-trust actor appears able to read tenant-isolated data that should stay separated."
+            ),
+        }
+
+    if _contains_keyword(path_blob, ACCOUNT_KEYWORDS):
+        return {
+            "impact_category": "account_takeover_action" if state_changing else "account_takeover_exposure",
+            "impact_level": "critical" if state_changing else "high",
+            "impact_rationale": (
+                "The affected surface looks account- or credential-related, so authorization drift could affect identity control."
+            ),
+        }
+
+    if _contains_keyword(path_blob, FINANCIAL_KEYWORDS):
+        return {
+            "impact_category": "financial_action" if state_changing else "financial_data",
+            "impact_level": "critical" if state_changing else "high",
+            "impact_rationale": (
+                "The path appears financial or transactional, so parity likely has direct business impact."
+            ),
+        }
+
+    if _contains_keyword(path_blob, PRIVILEGED_KEYWORDS) or "role" in deltas:
+        return {
+            "impact_category": "privileged_action" if state_changing else "privileged_data",
+            "impact_level": "critical" if state_changing else "high",
+            "impact_rationale": (
+                "The affected surface looks administrative or privilege-bearing, which raises the impact of authorization drift."
+            ),
+        }
+
+    if "ownership" in deltas or "object_ref" in deltas:
+        return {
+            "impact_category": "object_level_action" if state_changing else "object_level_data",
+            "impact_level": "high",
+            "impact_rationale": (
+                "The comparison differs by object or ownership context, which is typical of BOLA/IDOR-style impact."
+            ),
+        }
+
+    if state_changing:
+        return {
+            "impact_category": "unauthorized_state_change",
+            "impact_level": "high",
+            "impact_rationale": (
+                "A lower-trust actor appears able to reach a state-changing surface with response parity."
+            ),
+        }
+
+    return {
+        "impact_category": "sensitive_data_access",
+        "impact_level": "high" if issue_type in {"idor_bola", "role_based_access"} else "normal",
+        "impact_rationale": (
+            "The surface appears readable across contexts, which may expose data that should remain isolated."
+        ),
+    }
+
+
+def _higher_priority(*values: str) -> str:
+    winner = "low"
+    for value in values:
+        if PRIORITY_RANK.get(str(value or "low"), 0) > PRIORITY_RANK.get(winner, 0):
+            winner = str(value or "low")
+    return winner
+
+
 def _comparison_pairs(
     cases: list[dict[str, Any]],
     *,
@@ -87,14 +333,15 @@ def _comparison_pairs(
 
 
 def _suspicion_priority(method: str, observations: list[dict[str, Any]]) -> str:
-    if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
-        return "critical"
+    priority = "critical" if method.upper() in STATE_CHANGING_METHODS else "high"
     if any(
         observation["issue_type"] in {"cross_tenant_access", "idor_bola"}
         for observation in observations
     ):
-        return "critical"
-    return "high"
+        priority = _higher_priority(priority, "critical")
+    for observation in observations:
+        priority = _higher_priority(priority, str(observation.get("impact_level") or "low"))
+    return priority
 
 
 def _best_vulnerability_type(observations: list[dict[str, Any]]) -> str:
@@ -155,7 +402,11 @@ def analyze_differential_access(
                 continue
 
             deltas = _dimension_deltas(case, baseline)
-            matches, ratio = _responses_match(case_result, baseline_result, similarity_threshold)
+            parity = _parity_evidence(
+                case_result,
+                baseline_result,
+                similarity_threshold=similarity_threshold,
+            )
             case_success = int(case_result.get("status_code") or 0) in statuses
             baseline_success = int(baseline_result.get("status_code") or 0) in statuses
             issue_type = _issue_type(deltas)
@@ -167,23 +418,68 @@ def analyze_differential_access(
                 "baseline_status_code": baseline_result.get("status_code"),
                 "dimensions": deltas,
                 "issue_type": issue_type,
-                "similarity": round(ratio, 3),
-                "matched_response": matches,
+                "similarity": parity["similarity"],
+                "matched_response": parity["matched_response"],
                 "case_body_hash": case_result.get("body_hash"),
                 "baseline_body_hash": baseline_result.get("body_hash"),
+                "parity_score": parity["score"],
+                "confidence": parity["confidence"],
+                "parity_signals": parity["reasons"],
+                "same_location": parity["same_location"],
             }
             observations.append(observation)
 
             suspicious = False
+            evidence_threshold = 6 if case["expected_access"] == "deny" else 7
             if case["expected_access"] == "deny":
-                suspicious = case_success and (matches or baseline_success)
+                suspicious = (
+                    bool(deltas)
+                    and case_success
+                    and baseline_success
+                    and parity["primary_parity"]
+                    and int(parity["score"]) >= evidence_threshold
+                )
             elif case["expected_access"] == "unknown":
-                suspicious = case_success and matches and bool(deltas)
+                suspicious = (
+                    bool(deltas)
+                    and case_success
+                    and baseline_success
+                    and parity["primary_parity"]
+                    and int(parity["score"]) >= evidence_threshold
+                )
             elif baseline_case:
-                suspicious = case_success and matches and bool(deltas)
+                suspicious = (
+                    bool(deltas)
+                    and case_success
+                    and baseline_success
+                    and parity["primary_parity"]
+                    and int(parity["score"]) >= evidence_threshold
+                )
 
             if suspicious:
-                suspicious_observations.append(observation)
+                suspicious_observations.append(
+                    {
+                        **observation,
+                        **_impact_assessment(
+                            method=normalized_method,
+                            url=normalized_url,
+                            deltas=deltas,
+                            issue_type=issue_type,
+                            case=case,
+                            baseline=baseline,
+                        ),
+                    }
+                )
+
+        suspicious_observations.sort(
+            key=lambda item: (
+                PRIORITY_RANK.get(str(item.get("impact_level") or "low"), 0),
+                CONFIDENCE_RANK.get(str(item.get("confidence") or "low"), 0),
+                int(item.get("parity_score") or 0),
+                len(list(item.get("dimensions") or [])),
+            ),
+            reverse=True,
+        )
 
         error_count = sum(1 for result in results if result.get("error"))
         if error_count == len(results):
@@ -197,14 +493,16 @@ def analyze_differential_access(
         elif suspicious_observations:
             coverage_status = "in_progress"
             coverage_priority = _suspicion_priority(normalized_method, suspicious_observations)
+            top_impact = suspicious_observations[0]
             coverage_rationale = (
                 f"Differential access analysis found {len(suspicious_observations)} suspicious "
                 f"allow-vs-deny or cross-context parity comparison(s) on "
-                f"{normalized_method} {normalized_url}."
+                f"{normalized_method} {normalized_url}, with top impact "
+                f"{top_impact.get('impact_category', 'authorization_drift')}."
             )
             next_step = (
-                "Validate object ownership, tenant isolation, and role enforcement with concrete "
-                "business-impact PoCs before reporting"
+                f"Validate the highest-signal {top_impact.get('impact_category', 'authorization')} "
+                "path with a concrete business-impact PoC before reporting"
             )
         elif error_count > 0:
             coverage_status = "blocked"
