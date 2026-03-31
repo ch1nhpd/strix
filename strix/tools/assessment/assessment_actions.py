@@ -36,6 +36,10 @@ def clear_assessment_storage() -> None:
     except ImportError:
         clear_surface_mining_storage = None
     try:
+        from .assessment_surface_review_actions import clear_surface_review_storage
+    except ImportError:
+        clear_surface_review_storage = None
+    try:
         from .assessment_workflow_actions import clear_workflow_storage
     except ImportError:
         clear_workflow_storage = None
@@ -51,6 +55,8 @@ def clear_assessment_storage() -> None:
         clear_runtime_inventory_storage()
     if clear_surface_mining_storage is not None:
         clear_surface_mining_storage()
+    if clear_surface_review_storage is not None:
+        clear_surface_review_storage()
     if clear_workflow_storage is not None:
         clear_workflow_storage()
     if clear_tool_scan_storage is not None:

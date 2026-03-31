@@ -35,6 +35,7 @@ STATIC_EXTENSIONS = {
     ".woff",
     ".woff2",
 }
+OPENAPI_PARAM_LOCATIONS = {"query", "path", "header", "cookie"}
 
 
 def clear_surface_mining_storage() -> None:
@@ -176,35 +177,434 @@ def _artifact_sort(item: dict[str, Any]) -> tuple[int, str, str]:
     )
 
 
-def _parse_openapi_paths(response_body: str) -> list[dict[str, str]]:
+def _unique_strings(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        candidate = str(value).strip()
+        if candidate and candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
+
+
+def _resolve_json_pointer(payload: dict[str, Any], pointer: str) -> dict[str, Any] | None:
+    candidate = str(pointer or "").strip()
+    if not candidate.startswith("#/"):
+        return None
+    current: Any = payload
+    for token in candidate[2:].split("/"):
+        if not isinstance(current, dict):
+            return None
+        key = token.replace("~1", "/").replace("~0", "~")
+        current = current.get(key)
+    return current if isinstance(current, dict) else None
+
+
+def _schema_ref_name(schema: dict[str, Any]) -> str | None:
+    reference = str(schema.get("$ref") or "").strip()
+    if not reference:
+        return None
+    return reference.rsplit("/", 1)[-1] or None
+
+
+def _resolve_openapi_object(payload: dict[str, Any], value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    reference = str(value.get("$ref") or "").strip()
+    if not reference:
+        return value
+    resolved = _resolve_json_pointer(payload, reference)
+    return resolved if isinstance(resolved, dict) else None
+
+
+def _schema_required_names(
+    schema: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    prefix: str = "",
+    depth: int = 0,
+    visited: set[str] | None = None,
+) -> list[str]:
+    if depth > 2:
+        return []
+    resolved = _resolve_openapi_object(payload, schema)
+    if resolved is None:
+        return []
+
+    local_visited = set(visited or set())
+    reference = str(schema.get("$ref") or "").strip()
+    if reference:
+        if reference in local_visited:
+            return []
+        local_visited.add(reference)
+
+    required_names = set()
+    for name in list(resolved.get("required") or []):
+        if not isinstance(name, str):
+            continue
+        required_names.add(f"{prefix}.{name}" if prefix else name)
+
+    properties = resolved.get("properties") or {}
+    if isinstance(properties, dict):
+        for name, child_schema in properties.items():
+            if not isinstance(name, str) or not isinstance(child_schema, dict):
+                continue
+            child_prefix = f"{prefix}.{name}" if prefix else name
+            required_names.update(
+                _schema_required_names(
+                    child_schema,
+                    payload,
+                    prefix=child_prefix,
+                    depth=depth + 1,
+                    visited=local_visited,
+                )
+            )
+
+    for keyword in ["allOf", "anyOf", "oneOf"]:
+        for entry in list(resolved.get(keyword) or []):
+            if not isinstance(entry, dict):
+                continue
+            required_names.update(
+                _schema_required_names(
+                    entry,
+                    payload,
+                    prefix=prefix,
+                    depth=depth + 1,
+                    visited=local_visited,
+                )
+            )
+
+    items = resolved.get("items")
+    if isinstance(items, dict):
+        required_names.update(
+            _schema_required_names(
+                items,
+                payload,
+                prefix=prefix,
+                depth=depth + 1,
+                visited=local_visited,
+            )
+        )
+
+    return sorted(required_names)
+
+
+def _schema_details(
+    schema: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    prefix: str = "",
+    depth: int = 0,
+    visited: set[str] | None = None,
+) -> dict[str, list[str]]:
+    if depth > 2:
+        return {
+            "fields": [],
+            "identifiers": [],
+            "object_types": [],
+            "required_fields": [],
+        }
+
+    resolved = _resolve_openapi_object(payload, schema)
+    if resolved is None:
+        return {
+            "fields": [],
+            "identifiers": [],
+            "object_types": [],
+            "required_fields": [],
+        }
+
+    local_visited = set(visited or set())
+    reference = str(schema.get("$ref") or "").strip()
+    if reference:
+        if reference in local_visited:
+            return {
+                "fields": [],
+                "identifiers": [],
+                "object_types": [],
+                "required_fields": [],
+            }
+        local_visited.add(reference)
+
+    fields: list[str] = []
+    identifiers: list[str] = []
+    object_types: list[str] = []
+    required_fields = _schema_required_names(
+        schema,
+        payload,
+        prefix=prefix,
+        depth=depth,
+        visited=local_visited,
+    )
+
+    ref_name = _schema_ref_name(schema)
+    if ref_name:
+        object_types.append(ref_name)
+
+    properties = resolved.get("properties") or {}
+    if isinstance(properties, dict):
+        for name, child_schema in properties.items():
+            if not isinstance(name, str):
+                continue
+            field_name = f"{prefix}.{name}" if prefix else name
+            fields.append(field_name)
+            lowered = name.lower()
+            if (
+                lowered in {"id", "uuid", "token"}
+                or lowered.endswith(("_id", "_token"))
+                or "token" in lowered
+            ):
+                identifiers.append(field_name)
+            if isinstance(child_schema, dict):
+                child_ref_name = _schema_ref_name(child_schema)
+                if child_ref_name:
+                    object_types.append(child_ref_name)
+                child_details = _schema_details(
+                    child_schema,
+                    payload,
+                    prefix=field_name,
+                    depth=depth + 1,
+                    visited=local_visited,
+                )
+                fields.extend(child_details["fields"])
+                identifiers.extend(child_details["identifiers"])
+                object_types.extend(child_details["object_types"])
+                required_fields.extend(child_details["required_fields"])
+
+    items = resolved.get("items")
+    if isinstance(items, dict):
+        item_details = _schema_details(
+            items,
+            payload,
+            prefix=prefix,
+            depth=depth + 1,
+            visited=local_visited,
+        )
+        fields.extend(item_details["fields"])
+        identifiers.extend(item_details["identifiers"])
+        object_types.extend(item_details["object_types"])
+        required_fields.extend(item_details["required_fields"])
+
+    for keyword in ["allOf", "anyOf", "oneOf"]:
+        for entry in list(resolved.get(keyword) or []):
+            if not isinstance(entry, dict):
+                continue
+            nested = _schema_details(
+                entry,
+                payload,
+                prefix=prefix,
+                depth=depth + 1,
+                visited=local_visited,
+            )
+            fields.extend(nested["fields"])
+            identifiers.extend(nested["identifiers"])
+            object_types.extend(nested["object_types"])
+            required_fields.extend(nested["required_fields"])
+
+    return {
+        "fields": _unique_strings(fields)[:80],
+        "identifiers": _unique_strings(identifiers)[:40],
+        "object_types": _unique_strings(object_types)[:24],
+        "required_fields": _unique_strings(required_fields)[:80],
+    }
+
+
+def _security_requirement_names(requirements: Any) -> list[str]:
+    names: list[str] = []
+    for requirement in list(requirements or []):
+        if not isinstance(requirement, dict):
+            continue
+        names.extend(str(name) for name in requirement.keys() if str(name).strip())
+    return _unique_strings(names)
+
+
+def _parse_openapi_document(response_body: str) -> dict[str, Any] | None:
     try:
         payload = json.loads(response_body)
     except json.JSONDecodeError:
-        return []
+        return None
     if not isinstance(payload, dict):
-        return []
+        return None
     if not payload.get("openapi") and not payload.get("swagger"):
-        return []
+        return None
 
-    operations: list[dict[str, str]] = []
+    operations: list[dict[str, Any]] = []
+    parameters: list[dict[str, Any]] = []
+    request_fields: list[dict[str, Any]] = []
+    objects: list[dict[str, Any]] = []
     paths = payload.get("paths") or {}
-    if not isinstance(paths, dict):
-        return operations
+    top_level_security = _security_requirement_names(payload.get("security") or [])
+    components = payload.get("components") or {}
+    schemas = components.get("schemas") or {}
 
-    for path, item in paths.items():
-        if not isinstance(path, str) or not isinstance(item, dict):
-            continue
-        for method in item.keys():
-            normalized_method = str(method).upper()
-            if normalized_method not in HTTP_METHODS:
+    if isinstance(paths, dict):
+        for path, item in paths.items():
+            if not isinstance(path, str) or not isinstance(item, dict):
                 continue
-            operations.append(
+            normalized_path = _normalize_runtime_path(path)
+            path_parameters = [
+                entry
+                for entry in list(item.get("parameters") or [])
+                if isinstance(entry, dict)
+            ]
+            for method, operation in item.items():
+                normalized_method = str(method).upper()
+                if normalized_method not in HTTP_METHODS or not isinstance(operation, dict):
+                    continue
+
+                content_types = _unique_strings(
+                    [
+                        str(content_type)
+                        for content_type in list(
+                            (operation.get("requestBody") or {}).get("content", {}).keys()
+                        )
+                        if str(content_type).strip()
+                    ]
+                )
+                security = _security_requirement_names(operation.get("security") or [])
+                requires_auth = bool(security or top_level_security)
+                operations.append(
+                    {
+                        "method": normalized_method,
+                        "path": normalized_path,
+                        "content_types": content_types,
+                        "security": security or top_level_security,
+                        "requires_auth": requires_auth,
+                    }
+                )
+
+                for raw_parameter in [*path_parameters, *list(operation.get("parameters") or [])]:
+                    parameter = _resolve_openapi_object(payload, raw_parameter)
+                    if parameter is None:
+                        continue
+                    name = str(parameter.get("name") or "").strip()
+                    location = str(parameter.get("in") or "").strip().lower()
+                    if not name or location not in OPENAPI_PARAM_LOCATIONS:
+                        continue
+                    parameter_schema = _resolve_openapi_object(
+                        payload, parameter.get("schema") or {}
+                    ) or {}
+                    object_hint = (
+                        _schema_ref_name(parameter_schema)
+                        or _schema_ref_name(parameter.get("schema") or {})
+                        or str(parameter_schema.get("title") or "").strip()
+                        or None
+                    )
+                    parameters.append(
+                        {
+                            "method": normalized_method,
+                            "path": normalized_path,
+                            "name": name,
+                            "location": location,
+                            "required": bool(parameter.get("required")),
+                            "schema_type": str(parameter_schema.get("type") or "").strip() or None,
+                            "object_hint": object_hint,
+                            "identifier": (
+                                name.lower() in {"id", "uuid", "token"}
+                                or name.lower().endswith(("_id", "_token"))
+                            ),
+                        }
+                    )
+
+                request_body = _resolve_openapi_object(payload, operation.get("requestBody") or {})
+                if request_body is None:
+                    continue
+                content = request_body.get("content") or {}
+                if not isinstance(content, dict):
+                    continue
+                for content_type, media in content.items():
+                    if not isinstance(media, dict):
+                        continue
+                    schema = media.get("schema")
+                    if not isinstance(schema, dict):
+                        continue
+                    details = _schema_details(schema, payload)
+                    primary_object = next(iter(details["object_types"]), None)
+                    required_fields = set(details["required_fields"])
+                    for field_name in details["fields"]:
+                        request_fields.append(
+                            {
+                                "method": normalized_method,
+                                "path": normalized_path,
+                                "name": field_name,
+                                "location": "body",
+                                "content_type": str(content_type),
+                                "required": field_name in required_fields
+                                or bool(request_body.get("required")),
+                                "object_hint": primary_object,
+                                "identifier": field_name in details["identifiers"],
+                            }
+                        )
+
+    if isinstance(schemas, dict):
+        for schema_name, schema in schemas.items():
+            if not isinstance(schema_name, str) or not isinstance(schema, dict):
+                continue
+            details = _schema_details(schema, payload)
+            objects.append(
                 {
-                    "method": normalized_method,
-                    "path": _normalize_runtime_path(path),
+                    "object_type": schema_name,
+                    "fields": details["fields"][:30],
+                    "identifiers": details["identifiers"][:12],
                 }
             )
-    return operations
+
+    deduped_operations = []
+    seen_operations: set[tuple[str, str]] = set()
+    for item in operations:
+        key = (str(item.get("method") or ""), str(item.get("path") or ""))
+        if key in seen_operations:
+            continue
+        seen_operations.add(key)
+        deduped_operations.append(item)
+
+    deduped_parameters = []
+    seen_parameters: set[tuple[str, str, str, str]] = set()
+    for item in parameters:
+        key = (
+            str(item.get("method") or ""),
+            str(item.get("path") or ""),
+            str(item.get("name") or ""),
+            str(item.get("location") or ""),
+        )
+        if key in seen_parameters:
+            continue
+        seen_parameters.add(key)
+        deduped_parameters.append(item)
+
+    deduped_request_fields = []
+    seen_request_fields: set[tuple[str, str, str, str]] = set()
+    for item in request_fields:
+        key = (
+            str(item.get("method") or ""),
+            str(item.get("path") or ""),
+            str(item.get("name") or ""),
+            str(item.get("content_type") or ""),
+        )
+        if key in seen_request_fields:
+            continue
+        seen_request_fields.add(key)
+        deduped_request_fields.append(item)
+
+    deduped_objects = []
+    seen_objects: set[str] = set()
+    for item in objects:
+        object_type = str(item.get("object_type") or "").strip()
+        if not object_type or object_type in seen_objects:
+            continue
+        seen_objects.add(object_type)
+        deduped_objects.append(item)
+
+    return {
+        "documented_operations": deduped_operations[:60],
+        "documented_parameters": deduped_parameters[:120],
+        "documented_request_fields": deduped_request_fields[:120],
+        "documented_objects": deduped_objects[:60],
+        "documented_operation_count": len(deduped_operations),
+        "documented_parameter_count": len(deduped_parameters),
+        "documented_request_field_count": len(deduped_request_fields),
+        "documented_object_count": len(deduped_objects),
+        "security_schemes": _unique_strings([*top_level_security, *list((components.get("securitySchemes") or {}).keys())])[:20],
+    }
 
 
 def _record_for_response(record: SurfaceMiningRecord, *, include_artifacts: bool) -> SurfaceMiningRecord:
@@ -273,8 +673,13 @@ def mine_additional_attack_surface(
             normalized_path = _normalize_runtime_path(path)
             lowered_path = normalized_path.lower()
 
-            documented_operations = _parse_openapi_paths(response_body)
-            if documented_operations:
+            openapi_document = _parse_openapi_document(response_body)
+            documented_operations = (
+                list(openapi_document.get("documented_operations") or [])
+                if isinstance(openapi_document, dict)
+                else []
+            )
+            if openapi_document is not None:
                 key = ("openapi_spec", host, normalized_path)
                 if key not in seen_artifacts:
                     seen_artifacts.add(key)
@@ -285,8 +690,31 @@ def mine_additional_attack_surface(
                             "path": normalized_path,
                             "method": method,
                             "sample_request_id": request_id,
-                            "documented_operation_count": len(documented_operations),
+                            "documented_operation_count": int(
+                                openapi_document.get("documented_operation_count") or 0
+                            ),
                             "documented_operations": documented_operations[:20],
+                            "documented_parameter_count": int(
+                                openapi_document.get("documented_parameter_count") or 0
+                            ),
+                            "documented_parameters": list(
+                                openapi_document.get("documented_parameters") or []
+                            )[:40],
+                            "documented_request_field_count": int(
+                                openapi_document.get("documented_request_field_count") or 0
+                            ),
+                            "documented_request_fields": list(
+                                openapi_document.get("documented_request_fields") or []
+                            )[:40],
+                            "documented_object_count": int(
+                                openapi_document.get("documented_object_count") or 0
+                            ),
+                            "documented_objects": list(openapi_document.get("documented_objects") or [])[
+                                :24
+                            ],
+                            "security_schemes": list(openapi_document.get("security_schemes") or [])[
+                                :12
+                            ],
                             "priority": "high",
                         }
                     )

@@ -1958,6 +1958,7 @@ def _build_command(
     public_key_path: str | None,
     dictionary_path: str | None,
     output_path: str,
+    httpx_rich_metadata: bool = True,
 ) -> list[str]:
     executable = _resolve_tool_executable(tool_name)
     if executable is None:
@@ -2093,6 +2094,8 @@ def _build_command(
             "-o",
             output_path,
         ]
+        if httpx_rich_metadata:
+            command.extend(["-cname", "-asn", "-cdn", "-tls-grab"])
         if paths:
             path_file = _write_lines_file(paths)
             command.extend(["-path", path_file])
@@ -2471,22 +2474,169 @@ def _build_command(
     raise ValueError(f"Unsupported tool_name '{tool_name}'")
 
 
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        values: list[str] = []
+        for item in value:
+            values.extend(_string_list(item))
+        return _unique_strings(values)
+    if value is None:
+        return []
+    candidate = str(value).strip()
+    if not candidate or candidate.lower() in {"false", "none", "null"}:
+        return []
+    return [candidate]
+
+
+def _string_values_for_keys(value: Any, keys: tuple[str, ...]) -> list[str]:
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key in keys:
+            if key in value:
+                values.extend(_string_list(value.get(key)))
+        return _unique_strings(values)
+    return []
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _httpx_asn_details(item: dict[str, Any]) -> tuple[list[str], list[str]]:
+    details = item.get("asn")
+    if not isinstance(details, dict):
+        details = {}
+    asn_numbers = _unique_strings(
+        [
+            *_string_values_for_keys(details, ("asn", "as_number", "number", "id")),
+            *_string_list(item.get("asn_number")),
+            *_string_list(item.get("as_number")),
+        ]
+    )
+    asn_names = _unique_strings(
+        [
+            *_string_values_for_keys(
+                details,
+                ("as_name", "name", "org", "organization", "as_org", "description"),
+            ),
+            *_string_list(item.get("asn_name")),
+            *_string_list(item.get("as_name")),
+        ]
+    )
+    return asn_numbers, asn_names
+
+
+def _httpx_tls_subject_names(item: dict[str, Any]) -> list[str]:
+    tls = item.get("tls-grab") or item.get("tls_grab") or item.get("tls")
+    if not isinstance(tls, dict):
+        return []
+    return _unique_strings(
+        [
+            *_string_values_for_keys(
+                tls,
+                (
+                    "dns_names",
+                    "subject_an",
+                    "subject_alt_name",
+                    "subjectAltName",
+                    "subject_cn",
+                    "subject_common_name",
+                    "common_name",
+                    "cn",
+                ),
+            ),
+            *_string_values_for_keys(tls.get("subject_dn"), ("cn",)),
+            *_string_values_for_keys(tls.get("subject"), ("cn", "common_name", "dns_names")),
+        ]
+    )
+
+
+def _httpx_cdn_names(item: dict[str, Any]) -> list[str]:
+    cdn_names = _unique_strings(
+        [
+            *_string_list(item.get("cdn_name")),
+            *_string_list(item.get("cdn-name")),
+            *_string_list(item.get("provider")),
+        ]
+    )
+    if cdn_names:
+        return cdn_names
+    if bool(item.get("cdn")):
+        return ["detected"]
+    return []
+
+
 def _parse_httpx(content: str) -> list[dict[str, Any]]:
     findings = []
     for item in _parse_json_lines(content):
-        url = str(item.get("url") or "")
-        path = urlparse(url).path or "/"
+        url = str(item.get("url") or item.get("final_url") or "")
+        parsed = urlparse(url)
+        path = parsed.path or str(item.get("path") or "/") or "/"
+        port = _coerce_int(item.get("port")) or parsed.port
+        if port is None:
+            port = 80 if parsed.scheme == "http" else 443
+        asn_numbers, asn_names = _httpx_asn_details(item)
+        cdn_names = _httpx_cdn_names(item)
         findings.append(
             {
                 "url": url,
-                "path": path,
+                "host": str(item.get("host") or parsed.hostname or "").strip() or None,
+                "scheme": str(item.get("scheme") or parsed.scheme or "").strip() or None,
+                "port": port,
+                "path": path if str(path).startswith("/") else f"/{path}",
                 "status_code": item.get("status_code"),
                 "title": item.get("title"),
                 "webserver": item.get("webserver"),
-                "tech": item.get("tech", []),
+                "tech": _string_list(item.get("tech") or []),
+                "ip": _unique_strings(
+                    [
+                        *_string_list(item.get("ip")),
+                        *_string_list(item.get("a")),
+                        *_string_list(item.get("ips")),
+                    ]
+                ),
+                "cname": _unique_strings(
+                    [
+                        *_string_list(item.get("cname")),
+                        *_string_list(item.get("cnames")),
+                    ]
+                ),
+                "asn": asn_numbers,
+                "asn_name": asn_names,
+                "provider": _unique_strings([*cdn_names, *asn_names])[:12],
+                "cdn": cdn_names,
+                "tls_subject_names": _httpx_tls_subject_names(item),
+                "redirect_location": str(
+                    item.get("location") or item.get("redirect_location") or ""
+                ).strip()
+                or None,
             }
         )
-    return findings
+    return _dedupe_preserve_order(findings)
+
+
+def _should_retry_httpx_with_basic_flags(execution: dict[str, Any], output_content: str) -> bool:
+    if str(output_content or "").strip():
+        return False
+    if int(execution.get("exit_code") or 0) == 0:
+        return False
+    stderr = str(execution.get("stderr") or "").lower()
+    return any(
+        marker in stderr
+        for marker in [
+            "flag provided but not defined",
+            "invalid argument",
+            "no such option",
+            "unknown flag",
+            "unknown shorthand flag",
+            "unknown option",
+        ]
+    )
 
 
 def _parse_subfinder(content: str) -> list[dict[str, Any]]:
@@ -3307,6 +3457,52 @@ def _execute_or_reuse_tool_scan(
     )
 
 
+def _attack_surface_review_scope_targets(*groups: list[str]) -> list[str]:
+    scope_targets: list[str] = []
+    for group in groups:
+        for item in group:
+            candidate = str(item).strip()
+            if candidate:
+                scope_targets.append(candidate)
+    return _unique_strings(scope_targets)
+
+
+def _attack_surface_review_snapshot(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+
+    snapshot: dict[str, Any] = {"success": bool(result.get("success"))}
+    if not result.get("success"):
+        snapshot["error"] = result.get("error")
+        return snapshot
+
+    report = result.get("report") if isinstance(result.get("report"), dict) else {}
+    priorities = report.get("priorities") if isinstance(report.get("priorities"), dict) else {}
+    snapshot["target"] = result.get("target")
+    snapshot["summary"] = dict(report.get("summary") or {})
+    snapshot["top_targets_next"] = list(priorities.get("top_targets_next") or [])[:5]
+    snapshot["top_endpoints_next"] = list(priorities.get("top_endpoints_next") or [])[:5]
+    snapshot["top_blind_spots"] = list(priorities.get("top_blind_spots") or [])[:5]
+    return snapshot
+
+
+def _build_pipeline_attack_surface_review(
+    agent_state: Any,
+    *,
+    target: str,
+    scope_targets: list[str],
+    max_priorities: int,
+) -> dict[str, Any]:
+    from .assessment_surface_review_actions import build_attack_surface_review
+
+    return build_attack_surface_review(
+        agent_state=agent_state,
+        target=target,
+        scope_targets=scope_targets or None,
+        max_priorities=max_priorities,
+    )
+
+
 def _sqlmap_candidate_url(url: str, parameter_name: str) -> str:
     parsed = urlparse(url)
     existing_pairs = parse_qsl(parsed.query, keep_blank_values=True)
@@ -3382,6 +3578,28 @@ def _load_discovered_workflows(agent_state: Any, target: str) -> list[dict[str, 
     return [item for item in workflows if isinstance(item, dict)]
 
 
+def _load_mined_surface_artifacts(agent_state: Any, target: str) -> list[dict[str, Any]]:
+    try:
+        from .assessment_surface_actions import list_mined_attack_surface
+
+        result = list_mined_attack_surface(
+            agent_state=agent_state,
+            target=target,
+            include_artifacts=True,
+            max_items=1,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    if not result.get("success"):
+        return []
+    records = list(result.get("records") or [])
+    if not records:
+        return []
+    artifacts = records[0].get("artifacts") or records[0].get("selected_artifacts") or []
+    return [item for item in artifacts if isinstance(item, dict)]
+
+
 def _load_session_profiles(agent_state: Any) -> list[dict[str, Any]]:
     try:
         from .assessment_session_actions import list_session_profiles
@@ -3415,6 +3633,142 @@ def _get_focus_browser_manager() -> Any | None:
         return get_browser_tab_manager()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _candidate_urls_from_runtime_entries(runtime_entries: list[dict[str, Any]]) -> list[str]:
+    candidate_urls: list[str] = []
+    for entry in runtime_entries:
+        if not isinstance(entry, dict):
+            continue
+        for sample_url in list(entry.get("sample_urls") or []):
+            candidate = str(sample_url).strip()
+            if _is_http_url(candidate):
+                candidate_urls.append(candidate)
+        host = str(entry.get("host") or "").strip()
+        path = str(entry.get("normalized_path") or "").strip()
+        if host and path:
+            candidate_urls.append(f"https://{host}{path}")
+    return _unique_strings(candidate_urls)
+
+
+def _candidate_urls_from_surface_artifacts(surface_artifacts: list[dict[str, Any]]) -> list[str]:
+    candidate_urls: list[str] = []
+    for artifact in surface_artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        kind = str(artifact.get("kind") or "").strip().lower()
+        if kind == "websocket_endpoint":
+            continue
+        host = str(artifact.get("host") or "").strip()
+        path = str(artifact.get("path") or "").strip()
+        if host and path:
+            candidate_urls.append(f"https://{host}{path}")
+    return _unique_strings(candidate_urls)
+
+
+def _run_inventory_enrichment(
+    agent_state: Any,
+    *,
+    target: str,
+    steps: list[dict[str, Any]],
+    max_seed_items: int,
+    max_hypotheses: int,
+    include_workflows: bool,
+) -> dict[str, Any]:
+    from .assessment_runtime_actions import map_runtime_surface
+    from .assessment_surface_actions import mine_additional_attack_surface
+    from .assessment_workflow_actions import discover_workflows_from_requests
+
+    runtime_entries = _load_runtime_inventory_entries(agent_state, target)
+    surface_artifacts = _load_mined_surface_artifacts(agent_state, target)
+    workflows = _load_discovered_workflows(agent_state, target)
+    proxy_manager = _get_focus_proxy_manager()
+
+    runtime_result = None
+    surface_result = None
+    workflow_result = None
+    if proxy_manager is None:
+        return {
+            "runtime_entries": runtime_entries,
+            "surface_artifacts": surface_artifacts,
+            "workflows": workflows,
+            "runtime_result": runtime_result,
+            "surface_result": surface_result,
+            "workflow_result": workflow_result,
+        }
+
+    enrichment_seed_cap = max(max_seed_items, max_hypotheses * 2, 20)
+    if not runtime_entries:
+        try:
+            runtime_result = map_runtime_surface(
+                agent_state=agent_state,
+                target=target,
+                max_seed_items=enrichment_seed_cap,
+            )
+        except Exception as e:  # noqa: BLE001
+            runtime_result = {
+                "success": False,
+                "error": f"Failed to map runtime surface during enrichment: {e}",
+            }
+        _append_pipeline_step(
+            steps,
+            step_name="map_runtime_surface",
+            result=runtime_result,
+            metadata={"source": "inventory_enrichment"},
+        )
+        if runtime_result.get("success"):
+            runtime_entries = _load_runtime_inventory_entries(agent_state, target)
+
+    if not surface_artifacts:
+        try:
+            surface_result = mine_additional_attack_surface(
+                agent_state=agent_state,
+                target=target,
+                max_seed_items=enrichment_seed_cap,
+            )
+        except Exception as e:  # noqa: BLE001
+            surface_result = {
+                "success": False,
+                "error": f"Failed to mine additional attack surface during enrichment: {e}",
+            }
+        _append_pipeline_step(
+            steps,
+            step_name="mine_additional_attack_surface",
+            result=surface_result,
+            metadata={"source": "inventory_enrichment"},
+        )
+        if surface_result.get("success"):
+            surface_artifacts = _load_mined_surface_artifacts(agent_state, target)
+
+    if include_workflows and not workflows:
+        try:
+            workflow_result = discover_workflows_from_requests(
+                agent_state=agent_state,
+                target=target,
+                max_workflows=max(4, max_hypotheses),
+            )
+        except Exception as e:  # noqa: BLE001
+            workflow_result = {
+                "success": False,
+                "error": f"Failed to discover workflows during enrichment: {e}",
+            }
+        _append_pipeline_step(
+            steps,
+            step_name="discover_workflows_from_requests",
+            result=workflow_result,
+            metadata={"source": "inventory_enrichment"},
+        )
+        if workflow_result.get("success"):
+            workflows = _load_discovered_workflows(agent_state, target)
+
+    return {
+        "runtime_entries": runtime_entries,
+        "surface_artifacts": surface_artifacts,
+        "workflows": workflows,
+        "runtime_result": runtime_result,
+        "surface_result": surface_result,
+        "workflow_result": workflow_result,
+    }
 
 
 def _read_code_text(path: Path) -> str:
@@ -6180,6 +6534,7 @@ def run_security_tool_pipeline(
     max_seed_items: int = 25,
     max_hypotheses: int = 12,
     reuse_previous_runs: bool = True,
+    auto_build_review: bool = True,
     auto_synthesize_hypotheses: bool = True,
 ) -> dict[str, Any]:
     try:
@@ -6238,6 +6593,8 @@ def run_security_tool_pipeline(
         discovered_hosts: list[str] = []
         live_urls: list[str] = []
         sqlmap_candidates: list[dict[str, str]] = []
+        attack_surface_review_result = None
+        enrichment_result = None
 
         def run_step(
             step_name: str,
@@ -6431,6 +6788,16 @@ def run_security_tool_pipeline(
                     max_hypotheses=max_hypotheses,
                 )
 
+        if normalized_mode in {"blackbox", "hybrid"}:
+            enrichment_result = _run_inventory_enrichment(
+                agent_state=agent_state,
+                target=normalized_target,
+                steps=steps,
+                max_seed_items=max_seed_items,
+                max_hypotheses=max_hypotheses,
+                include_workflows=deep,
+            )
+
         successful_steps = [step for step in steps if step.get("success")]
         run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
         reused_step_count = sum(
@@ -6469,6 +6836,35 @@ def run_security_tool_pipeline(
                 persist=True,
                 include_existing_open=False,
             )
+        if auto_build_review:
+            review_scope_targets = _attack_surface_review_scope_targets(
+                provided_targets,
+                discovered_hosts,
+                live_urls,
+                [str(url).strip()] if url else [],
+            )
+            attack_surface_review_result = _build_pipeline_attack_surface_review(
+                agent_state=agent_state,
+                target=normalized_target,
+                scope_targets=review_scope_targets,
+                max_priorities=max_hypotheses,
+            )
+            review_snapshot = _attack_surface_review_snapshot(attack_surface_review_result) or {}
+            _append_pipeline_step(
+                steps,
+                step_name="build_attack_surface_review",
+                result=attack_surface_review_result,
+                metadata={
+                    "scope_target_count": len(review_scope_targets),
+                    "needs_more_data": (
+                        review_snapshot.get("summary", {}).get("needs_more_data")
+                        if isinstance(review_snapshot.get("summary"), dict)
+                        else None
+                    ),
+                },
+            )
+        successful_steps = [step for step in steps if step.get("success")]
+        run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
         summary_payload = {
             "mode": normalized_mode,
             "deep": deep,
@@ -6480,9 +6876,26 @@ def run_security_tool_pipeline(
             "discovered_hosts": _unique_strings(discovered_hosts),
             "live_urls": _unique_strings(live_urls),
             "run_ids": run_ids,
+            "inventory_enrichment": {
+                "runtime_mapped": bool(
+                    isinstance(enrichment_result, dict)
+                    and enrichment_result.get("runtime_entries")
+                ),
+                "surface_mined": bool(
+                    isinstance(enrichment_result, dict)
+                    and enrichment_result.get("surface_artifacts")
+                ),
+                "workflows_mapped": bool(
+                    isinstance(enrichment_result, dict)
+                    and enrichment_result.get("workflows")
+                ),
+            },
             "correlated_hypothesis_count": len(correlated_hypotheses),
             "auto_followup_count": len(auto_followup_results),
             "auto_followup_results": auto_followup_results,
+            "attack_surface_review": _attack_surface_review_snapshot(
+                attack_surface_review_result
+            ),
             "synthesized_hypothesis_count": (
                 int(synthesized_result.get("hypothesis_count") or 0)
                 if isinstance(synthesized_result, dict) and synthesized_result.get("success")
@@ -6516,8 +6929,10 @@ def run_security_tool_pipeline(
             "discovered_hosts": _unique_strings(discovered_hosts),
             "live_urls": _unique_strings(live_urls),
             "steps": steps,
+            "inventory_enrichment_result": enrichment_result,
             "correlated_hypotheses": correlated_hypotheses,
             "auto_followup_results": auto_followup_results,
+            "attack_surface_review_result": attack_surface_review_result,
             "synthesized_hypotheses_result": synthesized_result,
             "evidence_result": summary_evidence,
         }
@@ -6714,6 +7129,64 @@ def run_security_tool_scan(
         started_at = _utc_now()
         execution = _execute_tool_command(command, timeout=timeout)
         output_content = _read_output_file(resolved_output_path)
+        if normalized_tool_name == "httpx" and _should_retry_httpx_with_basic_flags(
+            execution, output_content
+        ):
+            command = _build_command(
+                normalized_tool_name,
+                targets=normalized_targets,
+                target_path=target_path,
+                url=url,
+                wordlist_path=wordlist_path,
+                raw_request_path=raw_request_path,
+                paths=normalized_paths,
+                headers=normalized_headers,
+                data=data,
+                request_method=normalized_request_method,
+                ports=ports,
+                top_ports=top_ports,
+                parameter=parameter,
+                configs=normalized_configs,
+                tags=normalized_tags,
+                severities=normalized_severities,
+                proxy_url=proxy_url,
+                automatic_scan=automatic_scan,
+                active_only=active_only,
+                collect_sources=collect_sources,
+                no_interactsh=no_interactsh,
+                use_js_crawl=use_js_crawl,
+                headless=headless,
+                known_files=known_files,
+                recursion=recursion,
+                recursion_depth=recursion_depth,
+                scan_type=scan_type,
+                host_discovery_disabled=host_discovery_disabled,
+                service_detection=service_detection,
+                default_scripts=default_scripts,
+                store_response=store_response,
+                flush_session=flush_session,
+                threads=threads,
+                rate_limit=rate_limit,
+                concurrency=concurrency,
+                bulk_size=bulk_size,
+                depth=depth,
+                timeout=timeout,
+                retries=retries,
+                max_time_minutes=max_time_minutes,
+                host_timeout=host_timeout,
+                script_timeout=script_timeout,
+                level=level,
+                risk=risk,
+                zapit=zapit,
+                jwt_token=normalized_jwt_token,
+                canary_value=normalized_canary_value,
+                public_key_path=normalized_public_key_path,
+                dictionary_path=normalized_dictionary_path,
+                output_path=resolved_output_path,
+                httpx_rich_metadata=False,
+            )
+            execution = _execute_tool_command(command, timeout=timeout)
+            output_content = _read_output_file(resolved_output_path)
         if not output_content and str(execution.get("stdout") or "").strip():
             output_content = str(execution.get("stdout") or "")
             try:
@@ -6913,6 +7386,7 @@ def run_security_focus_pipeline(
     max_active_targets: int = 3,
     max_hypotheses: int = 12,
     reuse_previous_runs: bool = True,
+    auto_build_review: bool = True,
     auto_synthesize_hypotheses: bool = True,
 ) -> dict[str, Any]:
     try:
@@ -6974,6 +7448,8 @@ def run_security_focus_pipeline(
         payload_result = None
         harness_result = None
         code_sink_result = None
+        attack_surface_review_result = None
+        enrichment_result = None
         active_probe_results: list[dict[str, Any]] = []
         artifact_retrieval_results: list[dict[str, Any]] = []
         selected_request_contexts: list[dict[str, Any]] = []
@@ -7029,6 +7505,30 @@ def run_security_focus_pipeline(
                 },
             )
 
+        enrichment_result = _run_inventory_enrichment(
+            agent_state=agent_state,
+            target=normalized_target,
+            steps=steps,
+            max_seed_items=max(max_active_targets * 2, 20),
+            max_hypotheses=max_hypotheses,
+            include_workflows=True,
+        )
+        runtime_entries = [
+            item
+            for item in list(enrichment_result.get("runtime_entries") or [])
+            if isinstance(item, dict)
+        ]
+        surface_artifacts = [
+            item
+            for item in list(enrichment_result.get("surface_artifacts") or [])
+            if isinstance(item, dict)
+        ]
+        discovered_workflows = [
+            item
+            for item in list(enrichment_result.get("workflows") or [])
+            if isinstance(item, dict)
+        ]
+
         candidate_urls = _unique_strings(
             [
                 *[item for item in normalized_targets if _is_http_url(item)],
@@ -7038,6 +7538,8 @@ def run_security_focus_pipeline(
                     for item in _stored_findings(store, target=normalized_target)
                     if str(item.get("url") or item.get("matched_at") or "").strip()
                 ],
+                *_candidate_urls_from_runtime_entries(runtime_entries),
+                *_candidate_urls_from_surface_artifacts(surface_artifacts),
             ]
         )
 
@@ -7062,11 +7564,21 @@ def run_security_focus_pipeline(
                         for item in _stored_findings(store, target=normalized_target)
                         if str(item.get("url") or item.get("matched_at") or "").strip()
                     ],
+                    *_candidate_urls_from_runtime_entries(
+                        _load_runtime_inventory_entries(agent_state, normalized_target)
+                    ),
+                    *_candidate_urls_from_surface_artifacts(
+                        _load_mined_surface_artifacts(agent_state, normalized_target)
+                    ),
                 ]
             )
 
-        runtime_entries = _load_runtime_inventory_entries(agent_state, normalized_target)
-        discovered_workflows = _load_discovered_workflows(agent_state, normalized_target)
+        if not runtime_entries:
+            runtime_entries = _load_runtime_inventory_entries(agent_state, normalized_target)
+        if not surface_artifacts:
+            surface_artifacts = _load_mined_surface_artifacts(agent_state, normalized_target)
+        if not discovered_workflows:
+            discovered_workflows = _load_discovered_workflows(agent_state, normalized_target)
         session_profiles = _load_session_profiles(agent_state)
 
         if normalized_focus == "auth_jwt":
@@ -8635,6 +9147,34 @@ def run_security_focus_pipeline(
                 persist=True,
                 include_existing_open=False,
             )
+        if auto_build_review:
+            review_scope_targets = _attack_surface_review_scope_targets(
+                normalized_targets,
+                candidate_urls,
+                [str(url).strip()] if url else [],
+            )
+            attack_surface_review_result = _build_pipeline_attack_surface_review(
+                agent_state=agent_state,
+                target=normalized_target,
+                scope_targets=review_scope_targets,
+                max_priorities=max_hypotheses,
+            )
+            review_snapshot = _attack_surface_review_snapshot(attack_surface_review_result) or {}
+            _append_pipeline_step(
+                steps,
+                step_name="build_attack_surface_review",
+                result=attack_surface_review_result,
+                metadata={
+                    "scope_target_count": len(review_scope_targets),
+                    "needs_more_data": (
+                        review_snapshot.get("summary", {}).get("needs_more_data")
+                        if isinstance(review_snapshot.get("summary"), dict)
+                        else None
+                    ),
+                },
+            )
+        successful_steps = [step for step in steps if step.get("success")]
+        run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
 
         summary_payload = {
             "focus": normalized_focus,
@@ -8642,6 +9182,11 @@ def run_security_focus_pipeline(
             "skipped_tools": skipped_tools,
             "run_ids": run_ids,
             "candidate_urls": candidate_urls[:max_active_targets],
+            "inventory_enrichment": {
+                "runtime_mapped": bool(runtime_entries),
+                "surface_mined": bool(surface_artifacts),
+                "workflows_mapped": bool(discovered_workflows),
+            },
             "bootstrap_result": bootstrap_result,
             "code_sink_result": code_sink_result,
             "active_probe_count": len(active_probe_results),
@@ -8658,6 +9203,9 @@ def run_security_focus_pipeline(
                 for item in selected_request_contexts[: max_active_targets * 2]
             ],
             "correlated_hypothesis_count": len(correlated_hypotheses),
+            "attack_surface_review": _attack_surface_review_snapshot(
+                attack_surface_review_result
+            ),
             "steps": steps,
         }
         summary_evidence = record_evidence(
@@ -8686,10 +9234,12 @@ def run_security_focus_pipeline(
             "payload_result": payload_result,
             "harness_result": harness_result,
             "code_sink_result": code_sink_result,
+            "inventory_enrichment_result": enrichment_result,
             "request_contexts": selected_request_contexts,
             "active_probe_results": active_probe_results,
             "artifact_retrieval_results": artifact_retrieval_results,
             "correlated_hypotheses": correlated_hypotheses,
+            "attack_surface_review_result": attack_surface_review_result,
             "synthesized_hypotheses_result": synthesized_result,
             "steps": steps,
             "evidence_result": summary_evidence,

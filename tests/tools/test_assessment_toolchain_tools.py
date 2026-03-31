@@ -22,6 +22,8 @@ from strix.tools.assessment import assessment_creative_actions as creative_actio
 from strix.tools.assessment import assessment_hunt_actions as hunt_actions
 from strix.tools.assessment import assessment_oob_actions as oob_actions
 from strix.tools.assessment import assessment_runtime_actions as runtime_actions
+from strix.tools.assessment import assessment_surface_actions as surface_actions
+from strix.tools.assessment import assessment_surface_review_actions as surface_review_actions
 from strix.tools.assessment import assessment_toolchain_actions as toolchain_actions
 from strix.tools.assessment import assessment_validation_actions as validation_actions
 from strix.tools.assessment import assessment_workflow_actions as workflow_actions
@@ -137,6 +139,24 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
             ],
         },
     )
+    review_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: review_calls.append(kwargs)
+        or {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": True},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
 
     def fake_run_security_tool_scan(agent_state: Any, tool_name: str, target: str, **kwargs: Any) -> dict[str, Any]:
         calls.append((tool_name, kwargs))
@@ -210,8 +230,153 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
         "https://admin.example.com/admin",
         "https://api.example.com/graphql",
     ]
-    assert result["step_count"] == 11
+    assert result["step_count"] == 12
+    assert result["attack_surface_review_result"]["success"] is True
+    assert review_calls[0]["scope_targets"] == [
+        "example.com",
+        "api.example.com",
+        "admin.example.com",
+        "https://api.example.com",
+        "https://admin.example.com/admin",
+        "https://api.example.com/graphql",
+    ]
     assert ledger["assessment_summary"]["evidence_total"] == 1
+
+
+def test_run_security_tool_pipeline_proactively_enriches_inventory(monkeypatch: Any) -> None:
+    runtime_loaded = False
+    surface_loaded = False
+    workflow_loaded = False
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [
+                {"tool_name": "httpx", "available": True, "executable": "httpx"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": False},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
+
+    def fake_run_security_tool_scan(
+        agent_state: Any,
+        tool_name: str,
+        target: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        findings = [{"url": "https://app.test", "status_code": 200}] if tool_name == "httpx" else []
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": len(findings),
+            "discovery_seed_count": len(findings),
+            "hypothesis_seed_count": 0,
+            "findings": findings,
+        }
+
+    def fake_runtime_loader(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return (
+            [
+                {
+                    "host": "app.test",
+                    "normalized_path": "/api/orders",
+                    "sample_urls": ["https://app.test/api/orders"],
+                }
+            ]
+            if runtime_loaded
+            else []
+        )
+
+    def fake_surface_loader(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return (
+            [{"kind": "js_route", "host": "app.test", "path": "/graphql"}] if surface_loaded else []
+        )
+
+    def fake_workflow_loader(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return (
+            [{"workflow_id": "wf_checkout", "type": "checkout"}] if workflow_loaded else []
+        )
+
+    def fake_map_runtime_surface(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_loaded
+        runtime_loaded = True
+        return {"success": True, "tool_name": "map_runtime_surface", "inventory_count": 1}
+
+    def fake_mine_additional_attack_surface(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal surface_loaded
+        surface_loaded = True
+        return {
+            "success": True,
+            "tool_name": "mine_additional_attack_surface",
+            "artifacts_total": 1,
+        }
+
+    def fake_discover_workflows_from_requests(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal workflow_loaded
+        workflow_loaded = True
+        return {
+            "success": True,
+            "tool_name": "discover_workflows_from_requests",
+            "workflow_count": 1,
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: object())
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", fake_runtime_loader)
+    monkeypatch.setattr(toolchain_actions, "_load_mined_surface_artifacts", fake_surface_loader)
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", fake_workflow_loader)
+    monkeypatch.setattr(runtime_actions, "map_runtime_surface", fake_map_runtime_surface)
+    monkeypatch.setattr(
+        surface_actions,
+        "mine_additional_attack_surface",
+        fake_mine_additional_attack_surface,
+    )
+    monkeypatch.setattr(
+        workflow_actions,
+        "discover_workflows_from_requests",
+        fake_discover_workflows_from_requests,
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        deep=True,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["inventory_enrichment_result"]["runtime_entries"][0]["host"] == "app.test"
+    assert result["inventory_enrichment_result"]["surface_artifacts"][0]["path"] == "/graphql"
+    assert result["inventory_enrichment_result"]["workflows"][0]["workflow_id"] == "wf_checkout"
+    assert any(step["step"] == "map_runtime_surface" for step in result["steps"])
+    assert any(step["step"] == "mine_additional_attack_surface" for step in result["steps"])
+    assert any(step["step"] == "discover_workflows_from_requests" for step in result["steps"])
 
 
 def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -> None:
@@ -226,6 +391,10 @@ def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -
                         "title": "Login",
                         "webserver": "nginx",
                         "tech": ["nextjs"],
+                        "cname": ["edge.app.test"],
+                        "asn": {"asn": "AS13335", "as_name": "Cloudflare"},
+                        "cdn_name": "cloudflare",
+                        "tls-grab": {"dns_names": ["app.test", "admin.app.test"]},
                     }
                 ),
                 json.dumps(
@@ -235,6 +404,7 @@ def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -
                         "title": "Order",
                         "webserver": "nginx",
                         "tech": ["nextjs"],
+                        "ip": ["104.16.0.10"],
                     }
                 ),
             ]
@@ -256,6 +426,10 @@ def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -
     assert result["success"] is True
     assert result["finding_count"] == 2
     assert result["discovery_seed_count"] == 2
+    assert result["findings"][0]["cname"] == ["edge.app.test"]
+    assert result["findings"][0]["asn"] == ["AS13335"]
+    assert result["findings"][0]["cdn"] == ["cloudflare"]
+    assert "app.test" in result["findings"][0]["tls_subject_names"]
     assert runs["run_count"] == 1
     assert runs["runs"][0]["finding_count"] == 2
     assert ledger["assessment_summary"]["coverage_total"] == 2
@@ -263,6 +437,46 @@ def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -
     surfaces = {item["surface"] for item in ledger["coverage"]}
     assert "Discovered path /admin" in surfaces
     assert "Discovered path /api/orders/123" in surfaces
+
+
+def test_run_security_tool_scan_httpx_falls_back_when_rich_flags_are_unsupported(
+    monkeypatch: Any,
+) -> None:
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(toolchain_actions, "_resolve_tool_executable", lambda tool_name: tool_name)
+
+    def fake_execute(command: list[str], timeout: int) -> dict[str, Any]:
+        commands.append(command)
+        output_path = command[command.index("-o") + 1]
+        if len(commands) == 1:
+            return {
+                "exit_code": 2,
+                "stdout": "",
+                "stderr": "flag provided but not defined: -tls-grab",
+            }
+        Path(output_path).write_text(
+            json.dumps({"url": "https://app.test/admin", "status_code": 200}),
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(toolchain_actions, "_execute_tool_command", fake_execute)
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_scan(
+        agent_state=state,
+        tool_name="httpx",
+        target="web",
+        targets=["https://app.test"],
+        include_findings=True,
+    )
+
+    assert result["success"] is True
+    assert result["finding_count"] == 1
+    assert len(commands) == 2
+    assert "-tls-grab" in commands[0]
+    assert "-tls-grab" not in commands[1]
 
 
 def test_execute_tool_invocation_allows_tool_args_named_tool_name(
@@ -1219,6 +1433,126 @@ def test_run_security_tool_pipeline_auto_escalates_workflow_race_followup(
     assert result["auto_followup_results"][0]["skipped"] is False
     assert any(step["step"] == "discover_workflows_from_requests" for step in result["steps"])
     assert any(step["step"] == "focus:workflow_race" for step in result["steps"])
+
+
+def test_run_security_focus_pipeline_auto_builds_attack_surface_review(monkeypatch: Any) -> None:
+    review_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: review_calls.append(kwargs)
+        or {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": True},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="focus-target",
+        focus="authz",
+        url="https://app.test/account",
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["attack_surface_review_result"]["success"] is True
+    assert any(step["step"] == "build_attack_surface_review" for step in result["steps"])
+    assert review_calls[0]["scope_targets"] == ["https://app.test/account"]
+
+
+def test_run_security_focus_pipeline_uses_surface_artifact_candidate_urls(
+    monkeypatch: Any,
+) -> None:
+    arjun_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [
+                {"tool_name": "arjun", "available": True, "executable": "arjun"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: None)
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_mined_surface_artifacts",
+        lambda *args, **kwargs: [
+            {"kind": "js_route", "host": "app.test", "path": "/search"},
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": True},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
+
+    def fake_run_security_tool_scan(
+        agent_state: Any,
+        tool_name: str,
+        target: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if tool_name == "arjun":
+            arjun_calls.append(kwargs)
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": 0,
+            "discovery_seed_count": 0,
+            "hypothesis_seed_count": 0,
+            "findings": [],
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="focus-target",
+        focus="xss",
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert arjun_calls[0]["url"] == "https://app.test/search"
 
 
 def test_run_security_focus_pipeline_auth_jwt_uses_specialized_steps(monkeypatch: Any) -> None:
@@ -2801,6 +3135,22 @@ def test_run_security_tool_pipeline_hybrid_includes_repo_scans(monkeypatch: Any)
             ],
         },
     )
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": False},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
 
     def fake_run_security_tool_scan(agent_state: Any, tool_name: str, target: str, **kwargs: Any) -> dict[str, Any]:
         calls.append(tool_name)
@@ -2844,4 +3194,5 @@ def test_run_security_tool_pipeline_hybrid_includes_repo_scans(monkeypatch: Any)
         "trivy",
         "trufflehog",
     ]
-    assert result["step_count"] == 9
+    assert result["step_count"] == 10
+    assert result["attack_surface_review_result"]["success"] is True

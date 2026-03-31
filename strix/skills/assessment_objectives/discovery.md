@@ -25,3 +25,4 @@ Primary goal: discover, validate, and report real security issues with strong ev
 - Use the coverage ledger aggressively to avoid blind spots
 - Use role-matrix and race testing on sensitive, state-changing, or multi-tenant flows
 - Extend the auto-seeded coverage inventory whenever runtime discovery reveals more surface area
+- Build and refresh the attack-surface review so scope, layered coverage, chain opportunities, and needs-more-data blind spots stay explicit

@@ -170,6 +170,7 @@ OPERATIONAL PRINCIPLES:
 - Use map_runtime_surface after proxy traffic or crawling to convert observed runtime behavior into a normalized endpoint inventory before deep black-box validation
 - Use mine_additional_attack_surface after proxy capture or JS/spec discovery to mine OpenAPI, GraphQL, JavaScript, and WebSocket artifacts that runtime inventory alone may miss
 - Use discover_workflows_from_requests to reconstruct multi-step state-changing flows before race, replay, or skipped-step validation
+- Use build_attack_surface_review after recon, surface mining, or focused validation to synthesize scope map v1, layered inventory, coverage ledger, chain candidates, and explicit blind spots marked as needs more data
 - Use synthesize_attack_hypotheses to turn mapped runtime surface, mined artifacts, workflows, and session context into concrete attack ideas and chains before narrowing onto a single bug class
 - Treat "Runtime inventory completeness" coverage as a hard stop for finishing; if runtime mapping was truncated or blocked, expand it or explicitly resolve it before finish_scan
 - After runtime inventory and session profiles exist, use run_inventory_differential_hunt to automatically push the highest-value authorization comparisons across the mapped runtime surface
@@ -217,6 +218,7 @@ EFFICIENCY TACTICS:
 - Use run_security_tool_pipeline when you need a fast, structured bootstrap across multiple wrapped tools instead of hand-stitching the first recon and discovery sequence yourself
 - Use run_security_focus_pipeline when broad recon already suggests auth/JWT, SSRF/OOB, SQLi, SSTI, XXE, upload validation drift, path traversal/file-read behavior, authorization drift, or workflow/race abuse and you need a depth-first follow-up instead of another generic sweep
 - Use run_security_tool_scan to drive arjun, bandit, dirsearch, ffuf, httpx, jwt_tool, katana, naabu, nuclei, nmap, semgrep, sqlmap, subfinder, trivy, trufflehog, wapiti, wafw00f, and zaproxy because it records normalized discovery coverage, scanner evidence, and hypotheses instead of leaving results as transient terminal output
+- Use list_attack_surface_reviews before concluding coverage so you can see what is confirmed, what remains suspected, what is only exposed-info or weak-signal, and where blind spots still need more data
 - Use list_security_tool_runs before repeating broad discovery so you can reuse prior structured runs and only rerun when scope, auth context, or tactics materially changed
 - Use generate_contextual_payloads when you need broad, encoded, context-aware payload families rather than hand-typing a few obvious probes
 - Use triage_attack_anomalies to score cross-variant response parity, timing, redirect, length, semantic exploit markers, and blind/OOB anomalies so hidden bug signals are surfaced instead of ignored as noise

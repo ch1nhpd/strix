@@ -1,0 +1,41 @@
+<tool name="build_attack_surface_review">
+  <description>Build a coverage-first attack-surface review from the currently stored runtime inventory, mined artifacts, workflows, wrapped tool runs, session profiles, and assessment ledger. The report organizes assets from domain to object, flags blind spots as needs more data, classifies signals as confirmed/suspected/exposed-info/weak-signal/duplicate-risk/out-of-scope/blind-spot, and returns an attack-surface graph plus coverage ledger.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label whose stored assessment data should be synthesized into a layered attack-surface review.</description>
+    </parameter>
+    <parameter name="scope_targets" required="false">
+      <description>Optional list of root domains, wildcard domains, hosts, or URLs used to seed scope normalization and scope-map v1.</description>
+    </parameter>
+    <parameter name="max_tool_runs" required="false">
+      <description>Maximum number of stored wrapped-tool runs to ingest into the review. Default: 100.</description>
+    </parameter>
+    <parameter name="max_session_profiles" required="false">
+      <description>Maximum number of stored session profiles to inspect when deriving role and boundary coverage. Default: 25.</description>
+    </parameter>
+    <parameter name="max_nodes" required="false">
+      <description>Maximum number of graph nodes to return in the attack-surface graph. Default: 250.</description>
+    </parameter>
+    <parameter name="max_edges" required="false">
+      <description>Maximum number of graph edges to return in the attack-surface graph. Default: 400.</description>
+    </parameter>
+    <parameter name="max_priorities" required="false">
+      <description>Maximum number of top-priority targets, endpoints, hypotheses, chains, and blind spots to return per priority bucket. Default: 12.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="list_attack_surface_reviews">
+  <description>List stored attack-surface review reports for the current root assessment context.</description>
+  <parameters>
+    <parameter name="target" required="false">
+      <description>Optional logical target label. When provided, only the matching stored review is returned.</description>
+    </parameter>
+    <parameter name="include_report" required="false">
+      <description>Whether to include the full stored report body in the response. Default: true.</description>
+    </parameter>
+    <parameter name="max_items" required="false">
+      <description>Maximum number of stored review records to return. Default: 25.</description>
+    </parameter>
+  </parameters>
+</tool>

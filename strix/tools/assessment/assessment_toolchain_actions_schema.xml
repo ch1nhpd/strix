@@ -8,7 +8,7 @@
 </tool>
 
 <tool name="run_security_tool_pipeline">
-  <description>Run an opinionated multi-tool assessment pipeline that orchestrates wrapped recon, discovery, and code-scanning tools while keeping all step outputs normalized into the shared assessment ledger.</description>
+  <description>Run an opinionated multi-tool assessment pipeline that orchestrates wrapped recon, discovery, and code-scanning tools while keeping all step outputs normalized into the shared assessment ledger. When proxy-derived context is available, the pipeline also attempts runtime mapping, additional surface mining, and workflow reconstruction before synthesizing the attack-surface review so layered inventory, coverage, and blind spots are visible immediately after the pipeline completes.</description>
   <parameters>
     <parameter name="target" required="true">
       <description>Logical target label used for all child runs, coverage, and evidence.</description>
@@ -46,6 +46,9 @@
     <parameter name="reuse_previous_runs" required="false">
       <description>When true, reuse prior successful runs with the same normalized scope instead of rerunning them. Default: true.</description>
     </parameter>
+    <parameter name="auto_build_review" required="false">
+      <description>When true, automatically build a layered attack-surface review from the resulting runtime, surface, workflow, tool-run, and ledger data after the pipeline completes. Default: true.</description>
+    </parameter>
     <parameter name="auto_synthesize_hypotheses" required="false">
       <description>When true, synthesize additional creative hypotheses from the resulting assessment state after the pipeline completes. Default: true.</description>
     </parameter>
@@ -53,7 +56,7 @@
 </tool>
 
 <tool name="run_security_focus_pipeline">
-  <description>Run a focused depth-first pipeline for a specific high-value bug class once broad recon has already surfaced leads. Supported focus values are auth_jwt, ssrf_oob, sqli, ssti, xxe, file_upload, path_traversal, authz, and workflow_race.</description>
+  <description>Run a focused depth-first pipeline for a specific high-value bug class once broad recon has already surfaced leads. Supported focus values are auth_jwt, ssrf_oob, sqli, ssti, xxe, file_upload, path_traversal, authz, and workflow_race. When stored runtime or surface data is missing, the pipeline attempts proxy-backed enrichment first so candidate URLs and workflows can come from runtime inventory, mined artifacts, and reconstructed flows instead of only raw scanner findings. By default it also builds an attack-surface review snapshot at the end so the next blind spots and chain candidates remain explicit.</description>
   <parameters>
     <parameter name="target" required="true">
       <description>Logical target label used for all child runs, coverage, evidence, and hypotheses.</description>
@@ -96,6 +99,9 @@
     </parameter>
     <parameter name="reuse_previous_runs" required="false">
       <description>When true, reuse prior successful runs with the same normalized scope instead of rerunning them. Default: true.</description>
+    </parameter>
+    <parameter name="auto_build_review" required="false">
+      <description>When true, automatically build a layered attack-surface review from the updated assessment state after the focus pipeline completes. Default: true.</description>
     </parameter>
     <parameter name="auto_synthesize_hypotheses" required="false">
       <description>When true, synthesize additional creative hypotheses from the resulting assessment state after the focus pipeline completes. Default: true.</description>
