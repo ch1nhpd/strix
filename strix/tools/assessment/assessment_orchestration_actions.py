@@ -84,6 +84,8 @@ _orchestration_autorun_queue_lock = threading.Lock()
 _orchestration_autorun_queue: dict[str, dict[str, Any]] = {}
 _orchestration_autorun_queue_loaded = False
 SUPPRESSED_DELEGATION_KEYS_CONTEXT_KEY = "_orchestration_suppressed_delegation_keys"
+BLOCKED_TERMINAL_DELEGATION_KEYS_CONTEXT_KEY = "_orchestration_blocked_terminal_delegation_keys"
+TERMINAL_DELEGATION_STATUSES = {"completed", "finished", "failed", "stopped", "error"}
 ROUND_TARGET_PATTERN = re.compile(
     r"run_attack_surface_orchestration_round\(target=(?:'([^']+)'|\"([^\"]+)\")",
     re.IGNORECASE,
@@ -302,6 +304,20 @@ def _completed_delegation_keys_since(
     return keys
 
 
+def _terminal_delegation_keys(agent_id: str) -> set[str]:
+    keys: set[str] = set()
+    for node_id, node in _agent_graph["nodes"].items():
+        if not _subtree_contains(node_id, agent_id):
+            continue
+        status = str(node.get("status") or "").strip().lower()
+        if status not in TERMINAL_DELEGATION_STATUSES:
+            continue
+        key = _delegation_key_from_task(str(node.get("task") or ""))
+        if key:
+            keys.add(key)
+    return keys
+
+
 def _suppressed_delegation_keys(agent_state: Any) -> set[str]:
     context = getattr(agent_state, "context", None)
     if not isinstance(context, dict):
@@ -330,6 +346,36 @@ def _set_suppressed_delegation_keys(agent_state: Any, keys: set[str]) -> None:
     context = getattr(agent_state, "context", None)
     if isinstance(context, dict):
         context[SUPPRESSED_DELEGATION_KEYS_CONTEXT_KEY] = normalized
+
+
+def _blocked_terminal_delegation_keys(agent_state: Any) -> set[str]:
+    context = getattr(agent_state, "context", None)
+    if not isinstance(context, dict):
+        return set()
+    values = context.get(BLOCKED_TERMINAL_DELEGATION_KEYS_CONTEXT_KEY)
+    if not isinstance(values, list):
+        return set()
+    return {
+        str(item).strip()
+        for item in values
+        if str(item).strip()
+    }
+
+
+def _set_blocked_terminal_delegation_keys(agent_state: Any, keys: set[str]) -> None:
+    normalized = sorted(
+        {
+            str(item).strip()
+            for item in keys
+            if str(item).strip()
+        }
+    )
+    if hasattr(agent_state, "update_context"):
+        agent_state.update_context(BLOCKED_TERMINAL_DELEGATION_KEYS_CONTEXT_KEY, normalized)
+        return
+    context = getattr(agent_state, "context", None)
+    if isinstance(context, dict):
+        context[BLOCKED_TERMINAL_DELEGATION_KEYS_CONTEXT_KEY] = normalized
 
 
 def _orchestrator_agent_state(agent_state: Any) -> Any:
@@ -1226,10 +1272,9 @@ def _with_round_followup(task: str, *, target: str) -> str:
     return (
         f"{task}\n"
         "Continuation:\n"
-        f"- If you add new coverage, evidence, hypotheses, or materially shrink a blind spot, call "
-        f"run_attack_surface_orchestration_round(target='{normalized_target}', require_new_data=True, inherit_context=True) "
-        "before finishing so the root subtree refreshes the layered review and launches the next wave.\n"
-        "- If nothing materially changed, do not call the orchestration round just to restate status."
+        f"- The root orchestrator already tracks target '{normalized_target}' and auto-refreshes follow-up when this child finishes.\n"
+        "- Do not manually launch another orchestration round from this child.\n"
+        "- Focus on producing durable coverage, evidence, hypotheses, or explicit blocked/needs-more-data outcomes."
     )
 
 
@@ -1865,7 +1910,8 @@ def spawn_attack_surface_agents(
         needs_more_data = bool(summary.get("needs_more_data"))
         active_keys = _active_delegation_keys(agent_state.agent_id)
         suppressed_keys = _suppressed_delegation_keys(agent_state)
-        blocked_keys = {*active_keys, *suppressed_keys}
+        terminal_blocked_keys = _blocked_terminal_delegation_keys(agent_state)
+        blocked_keys = {*active_keys, *suppressed_keys, *terminal_blocked_keys}
         candidates: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
 
@@ -2330,7 +2376,11 @@ def spawn_attack_surface_agents(
                 "reason": (
                     "recent duplicate just completed in current agent subtree"
                     if str(candidate.get("dedupe_key") or "") in suppressed_keys
-                    else "active duplicate already exists in current agent subtree"
+                    else (
+                        "duplicate already completed earlier in current agent subtree and no new coverage/evidence/review was observed"
+                        if str(candidate.get("dedupe_key") or "") in terminal_blocked_keys
+                        else "active duplicate already exists in current agent subtree"
+                    )
                 ),
             }
             for candidate in duplicate_candidates
@@ -2456,7 +2506,8 @@ def spawn_strong_signal_agents(
         ]
         active_keys = _active_delegation_keys(agent_state.agent_id)
         suppressed_keys = _suppressed_delegation_keys(agent_state)
-        blocked_keys = {*active_keys, *suppressed_keys}
+        terminal_blocked_keys = _blocked_terminal_delegation_keys(agent_state)
+        blocked_keys = {*active_keys, *suppressed_keys, *terminal_blocked_keys}
         candidates: list[dict[str, Any]] = []
 
         for hypothesis in hypotheses:
@@ -2591,7 +2642,11 @@ def spawn_strong_signal_agents(
                 "reason": (
                     "recent duplicate just completed in current agent subtree"
                     if str(candidate.get("dedupe_key") or "") in suppressed_keys
-                    else "active duplicate already exists in current agent subtree"
+                    else (
+                        "duplicate already completed earlier in current agent subtree and no new coverage/evidence/review was observed"
+                        if str(candidate.get("dedupe_key") or "") in terminal_blocked_keys
+                        else "active duplicate already exists in current agent subtree"
+                    )
                 ),
             }
             for candidate in duplicate_candidates
@@ -2715,7 +2770,8 @@ def spawn_impact_chain_agents(
         review_report = _load_review_report(agent_state, normalized_target)
         active_keys = _active_delegation_keys(agent_state.agent_id)
         suppressed_keys = _suppressed_delegation_keys(agent_state)
-        blocked_keys = {*active_keys, *suppressed_keys}
+        terminal_blocked_keys = _blocked_terminal_delegation_keys(agent_state)
+        blocked_keys = {*active_keys, *suppressed_keys, *terminal_blocked_keys}
         candidates: list[dict[str, Any]] = []
 
         for hypothesis in hypotheses:
@@ -2887,7 +2943,11 @@ def spawn_impact_chain_agents(
                 "reason": (
                     "recent duplicate just completed in current agent subtree"
                     if str(candidate.get("dedupe_key") or "") in suppressed_keys
-                    else "active duplicate already exists in current agent subtree"
+                    else (
+                        "duplicate already completed earlier in current agent subtree and no new coverage/evidence/review was observed"
+                        if str(candidate.get("dedupe_key") or "") in terminal_blocked_keys
+                        else "active duplicate already exists in current agent subtree"
+                    )
                 ),
             }
             for candidate in duplicate_candidates
@@ -3127,11 +3187,21 @@ def run_attack_surface_orchestration_round(
         review_swarm_result = None
         strong_signal_result = None
         impact_chain_result = None
+        completion_only_refresh = bool(refresh_reason.get("new_finished_descendants")) and not any(
+            bool(refresh_reason.get(reason_key))
+            for reason_key in ("force", "first_round", "new_ledger_activity", "review_missing", "review_outdated")
+        )
         recently_completed_keys = _completed_delegation_keys_since(
             root_agent_id,
             after_finished_at=previous_latest_finished_at,
         )
+        blocked_terminal_keys = (
+            _terminal_delegation_keys(root_agent_id)
+            if completion_only_refresh
+            else set()
+        )
         _set_suppressed_delegation_keys(orchestrator_state, recently_completed_keys)
+        _set_blocked_terminal_delegation_keys(orchestrator_state, blocked_terminal_keys)
         try:
             if include_review_swarm:
                 review_swarm_result = spawn_attack_surface_agents(
@@ -3160,6 +3230,7 @@ def run_attack_surface_orchestration_round(
                 )
         finally:
             _set_suppressed_delegation_keys(orchestrator_state, set())
+            _set_blocked_terminal_delegation_keys(orchestrator_state, set())
 
         refreshed_review_listing = list_attack_surface_reviews(
             agent_state=orchestrator_state,
@@ -3193,6 +3264,7 @@ def run_attack_surface_orchestration_round(
             "strategy": normalized_strategy,
             "scope_targets": list(resolved_scope_targets),
             "suppressed_completed_dedupe_keys": sorted(recently_completed_keys),
+            "blocked_terminal_dedupe_keys": sorted(blocked_terminal_keys),
         }
 
     except (TypeError, ValueError) as e:
@@ -3216,6 +3288,7 @@ def run_attack_surface_orchestration_round(
                 else None
             ),
             "suppressed_completed_dedupe_keys": sorted(recently_completed_keys),
+            "blocked_terminal_dedupe_keys": sorted(blocked_terminal_keys),
             "attack_surface_review_result": review_result,
             "attack_surface_agent_result": review_swarm_result,
             "strong_signal_agent_result": strong_signal_result,
