@@ -83,6 +83,7 @@ _orchestration_autorun_locks: dict[str, threading.Lock] = {}
 _orchestration_autorun_queue_lock = threading.Lock()
 _orchestration_autorun_queue: dict[str, dict[str, Any]] = {}
 _orchestration_autorun_queue_loaded = False
+SUPPRESSED_DELEGATION_KEYS_CONTEXT_KEY = "_orchestration_suppressed_delegation_keys"
 ROUND_TARGET_PATTERN = re.compile(
     r"run_attack_surface_orchestration_round\(target=(?:'([^']+)'|\"([^\"]+)\")",
     re.IGNORECASE,
@@ -278,6 +279,57 @@ def _active_delegation_keys(agent_id: str) -> set[str]:
         if key:
             keys.add(key)
     return keys
+
+
+def _completed_delegation_keys_since(
+    agent_id: str,
+    *,
+    after_finished_at: str | None = None,
+) -> set[str]:
+    keys: set[str] = set()
+    for node_id, node in _agent_graph["nodes"].items():
+        if not _subtree_contains(node_id, agent_id):
+            continue
+        status = str(node.get("status") or "").strip().lower()
+        if status not in {"completed", "finished"}:
+            continue
+        finished_at = str(node.get("finished_at") or "").strip() or None
+        if after_finished_at and finished_at and finished_at <= after_finished_at:
+            continue
+        key = _delegation_key_from_task(str(node.get("task") or ""))
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _suppressed_delegation_keys(agent_state: Any) -> set[str]:
+    context = getattr(agent_state, "context", None)
+    if not isinstance(context, dict):
+        return set()
+    values = context.get(SUPPRESSED_DELEGATION_KEYS_CONTEXT_KEY)
+    if not isinstance(values, list):
+        return set()
+    return {
+        str(item).strip()
+        for item in values
+        if str(item).strip()
+    }
+
+
+def _set_suppressed_delegation_keys(agent_state: Any, keys: set[str]) -> None:
+    normalized = sorted(
+        {
+            str(item).strip()
+            for item in keys
+            if str(item).strip()
+        }
+    )
+    if hasattr(agent_state, "update_context"):
+        agent_state.update_context(SUPPRESSED_DELEGATION_KEYS_CONTEXT_KEY, normalized)
+        return
+    context = getattr(agent_state, "context", None)
+    if isinstance(context, dict):
+        context[SUPPRESSED_DELEGATION_KEYS_CONTEXT_KEY] = normalized
 
 
 def _orchestrator_agent_state(agent_state: Any) -> Any:
@@ -1812,6 +1864,8 @@ def spawn_attack_surface_agents(
         summary = report.get("summary") or {}
         needs_more_data = bool(summary.get("needs_more_data"))
         active_keys = _active_delegation_keys(agent_state.agent_id)
+        suppressed_keys = _suppressed_delegation_keys(agent_state)
+        blocked_keys = {*active_keys, *suppressed_keys}
         candidates: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
 
@@ -2252,12 +2306,12 @@ def spawn_attack_surface_agents(
         duplicate_candidates = [
             candidate
             for candidate in candidates
-            if str(candidate.get("dedupe_key") or "") in active_keys
+            if str(candidate.get("dedupe_key") or "") in blocked_keys
         ]
         eligible_candidates = [
             candidate
             for candidate in candidates
-            if str(candidate.get("dedupe_key") or "") not in active_keys
+            if str(candidate.get("dedupe_key") or "") not in blocked_keys
         ]
         recommended, phase_plan = _select_phase_swarm(
             candidates=eligible_candidates,
@@ -2273,7 +2327,11 @@ def spawn_attack_surface_agents(
                 "name": candidate.get("name"),
                 "phase": candidate.get("phase"),
                 "kind": candidate.get("kind"),
-                "reason": "active duplicate already exists in current agent subtree",
+                "reason": (
+                    "recent duplicate just completed in current agent subtree"
+                    if str(candidate.get("dedupe_key") or "") in suppressed_keys
+                    else "active duplicate already exists in current agent subtree"
+                ),
             }
             for candidate in duplicate_candidates
         ]
@@ -2397,6 +2455,8 @@ def spawn_strong_signal_agents(
             item for item in list(assessment_result.get("evidence") or []) if isinstance(item, dict)
         ]
         active_keys = _active_delegation_keys(agent_state.agent_id)
+        suppressed_keys = _suppressed_delegation_keys(agent_state)
+        blocked_keys = {*active_keys, *suppressed_keys}
         candidates: list[dict[str, Any]] = []
 
         for hypothesis in hypotheses:
@@ -2513,12 +2573,12 @@ def spawn_strong_signal_agents(
         duplicate_candidates = [
             candidate
             for candidate in candidates
-            if str(candidate.get("dedupe_key") or "") in active_keys
+            if str(candidate.get("dedupe_key") or "") in blocked_keys
         ]
         eligible_candidates = [
             candidate
             for candidate in candidates
-            if str(candidate.get("dedupe_key") or "") not in active_keys
+            if str(candidate.get("dedupe_key") or "") not in blocked_keys
         ]
         recommended = eligible_candidates[:max_agents]
 
@@ -2528,7 +2588,11 @@ def spawn_strong_signal_agents(
                 "dedupe_key": str(candidate.get("dedupe_key") or ""),
                 "name": candidate.get("name"),
                 "hypothesis_id": candidate.get("hypothesis_id"),
-                "reason": "active duplicate already exists in current agent subtree",
+                "reason": (
+                    "recent duplicate just completed in current agent subtree"
+                    if str(candidate.get("dedupe_key") or "") in suppressed_keys
+                    else "active duplicate already exists in current agent subtree"
+                ),
             }
             for candidate in duplicate_candidates
         ]
@@ -2650,6 +2714,8 @@ def spawn_impact_chain_agents(
         ]
         review_report = _load_review_report(agent_state, normalized_target)
         active_keys = _active_delegation_keys(agent_state.agent_id)
+        suppressed_keys = _suppressed_delegation_keys(agent_state)
+        blocked_keys = {*active_keys, *suppressed_keys}
         candidates: list[dict[str, Any]] = []
 
         for hypothesis in hypotheses:
@@ -2803,12 +2869,12 @@ def spawn_impact_chain_agents(
         duplicate_candidates = [
             candidate
             for candidate in candidates
-            if str(candidate.get("dedupe_key") or "") in active_keys
+            if str(candidate.get("dedupe_key") or "") in blocked_keys
         ]
         eligible_candidates = [
             candidate
             for candidate in candidates
-            if str(candidate.get("dedupe_key") or "") not in active_keys
+            if str(candidate.get("dedupe_key") or "") not in blocked_keys
         ]
         recommended = eligible_candidates[:max_agents]
 
@@ -2818,7 +2884,11 @@ def spawn_impact_chain_agents(
                 "dedupe_key": str(candidate.get("dedupe_key") or ""),
                 "name": candidate.get("name"),
                 "hypothesis_id": candidate.get("hypothesis_id"),
-                "reason": "active duplicate already exists in current agent subtree",
+                "reason": (
+                    "recent duplicate just completed in current agent subtree"
+                    if str(candidate.get("dedupe_key") or "") in suppressed_keys
+                    else "active duplicate already exists in current agent subtree"
+                ),
             }
             for candidate in duplicate_candidates
         ]
@@ -3057,31 +3127,39 @@ def run_attack_surface_orchestration_round(
         review_swarm_result = None
         strong_signal_result = None
         impact_chain_result = None
-        if include_review_swarm:
-            review_swarm_result = spawn_attack_surface_agents(
-                agent_state=orchestrator_state,
-                target=normalized_target,
-                max_agents=max_review_agents,
-                strategy=normalized_strategy,
-                dry_run=dry_run,
-                inherit_context=inherit_context,
-            )
-        if include_signal_swarm:
-            strong_signal_result = spawn_strong_signal_agents(
-                agent_state=orchestrator_state,
-                target=normalized_target,
-                max_agents=max_signal_agents,
-                dry_run=dry_run,
-                inherit_context=inherit_context,
-            )
-        if include_impact_swarm:
-            impact_chain_result = spawn_impact_chain_agents(
-                agent_state=orchestrator_state,
-                target=normalized_target,
-                max_agents=max_impact_agents,
-                dry_run=dry_run,
-                inherit_context=inherit_context,
-            )
+        recently_completed_keys = _completed_delegation_keys_since(
+            root_agent_id,
+            after_finished_at=previous_latest_finished_at,
+        )
+        _set_suppressed_delegation_keys(orchestrator_state, recently_completed_keys)
+        try:
+            if include_review_swarm:
+                review_swarm_result = spawn_attack_surface_agents(
+                    agent_state=orchestrator_state,
+                    target=normalized_target,
+                    max_agents=max_review_agents,
+                    strategy=normalized_strategy,
+                    dry_run=dry_run,
+                    inherit_context=inherit_context,
+                )
+            if include_signal_swarm:
+                strong_signal_result = spawn_strong_signal_agents(
+                    agent_state=orchestrator_state,
+                    target=normalized_target,
+                    max_agents=max_signal_agents,
+                    dry_run=dry_run,
+                    inherit_context=inherit_context,
+                )
+            if include_impact_swarm:
+                impact_chain_result = spawn_impact_chain_agents(
+                    agent_state=orchestrator_state,
+                    target=normalized_target,
+                    max_agents=max_impact_agents,
+                    dry_run=dry_run,
+                    inherit_context=inherit_context,
+                )
+        finally:
+            _set_suppressed_delegation_keys(orchestrator_state, set())
 
         refreshed_review_listing = list_attack_surface_reviews(
             agent_state=orchestrator_state,
@@ -3114,6 +3192,7 @@ def run_attack_surface_orchestration_round(
             else "",
             "strategy": normalized_strategy,
             "scope_targets": list(resolved_scope_targets),
+            "suppressed_completed_dedupe_keys": sorted(recently_completed_keys),
         }
 
     except (TypeError, ValueError) as e:
@@ -3136,6 +3215,7 @@ def run_attack_surface_orchestration_round(
                 if isinstance(refreshed_review_record, dict)
                 else None
             ),
+            "suppressed_completed_dedupe_keys": sorted(recently_completed_keys),
             "attack_surface_review_result": review_result,
             "attack_surface_agent_result": review_swarm_result,
             "strong_signal_agent_result": strong_signal_result,

@@ -1521,6 +1521,123 @@ def test_run_attack_surface_orchestration_round_reruns_when_ledger_changes(
     assert build_count == 2
 
 
+def test_run_attack_surface_orchestration_round_suppresses_just_completed_duplicate_agent(
+    monkeypatch: Any,
+) -> None:
+    state = DummyState("agent_root")
+    agents_graph_actions._agent_graph["nodes"]["agent_root"] = {
+        "id": "agent_root",
+        "name": "Root",
+        "task": "root orchestration",
+        "status": "running",
+        "parent_id": None,
+    }
+
+    def fake_build_attack_surface_review(
+        agent_state: Any,
+        target: str,
+        scope_targets: list[str] | None = None,
+        max_priorities: int = 16,
+    ) -> dict[str, Any]:
+        surface_review_actions._surface_review_storage.setdefault("agent_root", {})["web"] = {
+            "target": target,
+            "updated_at": "2026-04-01T00:00:10+00:00",
+            "report": {
+                "summary": {"needs_more_data": True},
+                "priorities": {
+                    "top_targets_next": [
+                        {
+                            "host": "api.app.test",
+                            "preliminary_type": "api",
+                            "coverage_status": "mapped",
+                            "signal_classification": "confirmed",
+                            "priority": "critical",
+                        }
+                    ],
+                    "top_services_next": [],
+                    "top_modules_next": [],
+                    "top_endpoints_next": [],
+                    "top_objects_next": [],
+                    "top_params_objects": [],
+                    "top_recon_value_exposures": [],
+                    "top_reportable_hypotheses": [],
+                    "top_chain_opportunities": [],
+                    "top_role_boundaries_next": [],
+                    "top_bug_class_gaps_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        }
+        return {
+            "success": True,
+            "target": target,
+            "report": surface_review_actions._surface_review_storage["agent_root"]["web"]["report"],
+        }
+
+    monkeypatch.setattr(surface_review_actions, "build_attack_surface_review", fake_build_attack_surface_review)
+    monkeypatch.setattr(
+        orchestration_actions,
+        "spawn_strong_signal_agents",
+        lambda *args, **kwargs: {"success": True, "created_count": 0, "recommended_count": 0, "skipped_count": 0},
+    )
+    monkeypatch.setattr(
+        orchestration_actions,
+        "spawn_impact_chain_agents",
+        lambda *args, **kwargs: {"success": True, "created_count": 0, "recommended_count": 0, "skipped_count": 0},
+    )
+
+    first = orchestration_actions.run_attack_surface_orchestration_round(
+        agent_state=state,
+        target="web",
+        force=True,
+        dry_run=True,
+        max_review_agents=1,
+        include_signal_swarm=False,
+        include_impact_swarm=False,
+    )
+
+    agents_graph_actions._agent_graph["nodes"]["agent_child"] = {
+        "id": "agent_child",
+        "name": "P1 Recon api.app.test",
+        "task": "Delegation key: recon-host|api.app.test\nPhase: Phase 1 layered reconnaissance and surface expansion",
+        "status": "completed",
+        "parent_id": "agent_root",
+        "finished_at": "2026-04-01T00:00:30+00:00",
+    }
+
+    create_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        orchestration_actions,
+        "create_agent",
+        lambda agent_state, task, name, inherit_context=True, skills=None: create_calls.append(
+            {"task": task, "name": name, "skills": skills}
+        )
+        or {"success": True, "agent_id": "agent_new", "active_skills": skills.split(",") if skills else []},
+    )
+
+    second = orchestration_actions.run_attack_surface_orchestration_round(
+        agent_state=state,
+        target="web",
+        dry_run=False,
+        max_review_agents=1,
+        include_signal_swarm=False,
+        include_impact_swarm=False,
+    )
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["skipped"] is False
+    assert second["spawn_summary"]["review_created"] == 0
+    assert "recon-host|api.app.test" in second["suppressed_completed_dedupe_keys"]
+    assert create_calls == []
+    assert second["attack_surface_agent_result"]["skipped_count"] == 1
+    assert second["attack_surface_agent_result"]["skipped_agents"][0]["dedupe_key"] == "recon-host|api.app.test"
+    assert (
+        second["attack_surface_agent_result"]["skipped_agents"][0]["reason"]
+        == "recent duplicate just completed in current agent subtree"
+    )
+
+
 def test_run_attack_surface_orchestration_round_reruns_when_completed_descendant_changes(
     monkeypatch: Any,
 ) -> None:
