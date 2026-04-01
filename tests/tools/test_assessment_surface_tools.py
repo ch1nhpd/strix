@@ -503,6 +503,14 @@ def test_build_attack_surface_review_maps_layers_and_blind_spots() -> None:
         == "blind-spot"
     )
     assert report["coverage_ledger"]["role_boundary"][2]["status"] == "needs more data"
+    assert report["priorities"]["top_services_next"]
+    assert report["priorities"]["top_modules_next"]
+    assert report["priorities"]["top_objects_next"]
+    assert any(
+        item["boundary"] == "tenant A/B"
+        for item in report["priorities"]["top_role_boundaries_next"]
+    )
+    assert report["priorities"]["top_bug_class_gaps_next"]
     assert report["chain_analysis"] != []
     assert listed["success"] is True
     assert listed["records"][0]["summary"] == report["summary"]

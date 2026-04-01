@@ -201,6 +201,140 @@ def _max_priority(values: list[str]) -> str:
     return max(values, key=_priority_rank)
 
 
+def _priority_for_service(
+    *,
+    port: int,
+    auth_wall: str,
+    data_sensitivity_guess: str,
+    bug_classes: list[str],
+    app_family: list[str],
+    fingerprint: list[str],
+    privilege_boundary: list[str],
+) -> str:
+    priorities = ["normal"]
+    blob = " ".join([*bug_classes, *app_family, *privilege_boundary]).lower()
+    if port not in {80, 443}:
+        priorities.append("high")
+    if auth_wall in {"protected", "mixed", "likely protected"}:
+        priorities.append("high")
+    if data_sensitivity_guess == "high":
+        priorities.append("high")
+    if fingerprint == ["needs more data"] or not fingerprint:
+        priorities.append("high")
+    if any(keyword in blob for keyword in ["admin", "auth", "billing", "graphql", "tenant", "token"]):
+        priorities.append("high")
+    if any(
+        keyword in blob
+        for keyword in [
+            "authentication",
+            "authorization",
+            "business logic",
+            "file upload",
+            "idor",
+            "path traversal",
+            "rce",
+            "ssrf",
+            "xss",
+        ]
+    ):
+        priorities.append("critical")
+    return _max_priority(priorities)
+
+
+def _priority_for_application(
+    *,
+    application_module: str,
+    hidden_routes: list[str],
+    docs_endpoints: list[str],
+    config_artifacts: list[str],
+    backup_artifacts: list[str],
+    upload_surfaces: list[str],
+    download_surfaces: list[str],
+    auth_surfaces: list[str],
+    billing_surfaces: list[str],
+    bug_classes: list[str],
+) -> str:
+    priorities = ["normal"]
+    blob = " ".join([application_module, *bug_classes]).lower()
+    if hidden_routes or docs_endpoints or upload_surfaces or download_surfaces:
+        priorities.append("high")
+    if auth_surfaces or billing_surfaces:
+        priorities.append("high")
+    if config_artifacts or backup_artifacts:
+        priorities.append("critical")
+    if any(keyword in blob for keyword in ["auth", "admin", "billing", "payment", "graphql"]):
+        priorities.append("high")
+    if any(
+        keyword in blob
+        for keyword in [
+            "authentication",
+            "authorization",
+            "business logic",
+            "file upload",
+            "idor",
+            "path traversal",
+            "xss",
+        ]
+    ):
+        priorities.append("critical")
+    return _max_priority(priorities)
+
+
+def _priority_for_object(
+    *,
+    object_type: str,
+    identifiers: list[str],
+    fields: list[str],
+    trust_boundaries: list[str],
+    bug_classes: list[str],
+    related_paths: list[str],
+) -> str:
+    priorities = ["normal"]
+    blob = " ".join(
+        [object_type, *identifiers, *fields, *trust_boundaries, *bug_classes, *related_paths]
+    ).lower()
+    if identifiers or trust_boundaries or bug_classes:
+        priorities.append("high")
+    if any(
+        keyword in blob
+        for keyword in [
+            "account",
+            "admin",
+            "billing",
+            "invite",
+            "permission",
+            "price",
+            "role",
+            "status",
+            "tenant",
+            "token",
+            "user",
+        ]
+    ):
+        priorities.append("critical")
+    return _max_priority(priorities)
+
+
+def _priority_for_role_boundary(boundary: str, status: str) -> str:
+    priorities = ["normal"]
+    lowered = f"{boundary} {status}".lower()
+    if status != "covered":
+        priorities.append("high")
+    if any(keyword in lowered for keyword in ["privileged", "tenant", "admin", "suspended", "deleted"]):
+        priorities.append("critical")
+    return _max_priority(priorities)
+
+
+def _priority_for_bug_class_gap(bug_class: str, status: str) -> str:
+    priorities = ["normal"]
+    lowered = f"{bug_class} {status}".lower()
+    if status != "strong coverage":
+        priorities.append("high")
+    if any(keyword in lowered for keyword in ["authentication", "authorization", "business logic"]):
+        priorities.append("critical")
+    return _max_priority(priorities)
+
+
 def _signal_classification(
     *,
     confirmed: bool = False,
@@ -1944,6 +2078,14 @@ def build_attack_surface_review(
                 "trust_boundaries": sorted(item["trust_boundaries"]),
                 "bug_classes": sorted(item["bug_classes"]),
                 "sources": sorted(item["sources"]),
+                "priority": _priority_for_object(
+                    object_type=str(item["object_type"]),
+                    identifiers=sorted(item["identifiers"]),
+                    fields=sorted(item["fields"]),
+                    trust_boundaries=sorted(item["trust_boundaries"]),
+                    bug_classes=sorted(item["bug_classes"]),
+                    related_paths=sorted(item["related_paths"]),
+                ),
                 "signal_classification": item["signal_classification"],
                 "coverage_status": item["coverage_status"],
             }
@@ -1984,6 +2126,15 @@ def build_attack_surface_review(
                 "data_sensitivity_guess": item["data_sensitivity_guess"],
                 "privilege_boundary": sorted(item["privilege_boundary"]),
                 "bug_classes": sorted(item["bug_classes"]),
+                "priority": _priority_for_service(
+                    port=int(item["port"]),
+                    auth_wall=str(item["auth_wall"]),
+                    data_sensitivity_guess=str(item["data_sensitivity_guess"]),
+                    bug_classes=sorted(item["bug_classes"]),
+                    app_family=sorted(item["app_family"]),
+                    fingerprint=sorted(item["fingerprints"]) or ["needs more data"],
+                    privilege_boundary=sorted(item["privilege_boundary"]),
+                ),
                 "coverage_status": item["coverage_status"],
                 "signal_classification": item["signal_classification"],
             }
@@ -2110,6 +2261,18 @@ def build_attack_surface_review(
                 "auth_surfaces": sorted(item["auth_surfaces"]),
                 "billing_surfaces": sorted(item["billing_surfaces"]),
                 "bug_classes": sorted(item["bug_classes"]),
+                "priority": _priority_for_application(
+                    application_module=str(item["application_module"]),
+                    hidden_routes=sorted(item["hidden_routes"]),
+                    docs_endpoints=sorted(item["docs_endpoints"]),
+                    config_artifacts=sorted(item["config_artifacts"]),
+                    backup_artifacts=sorted(item["backup_artifacts"]),
+                    upload_surfaces=sorted(item["upload_surfaces"]),
+                    download_surfaces=sorted(item["download_surfaces"]),
+                    auth_surfaces=sorted(item["auth_surfaces"]),
+                    billing_surfaces=sorted(item["billing_surfaces"]),
+                    bug_classes=sorted(item["bug_classes"]),
+                ),
                 "coverage_status": item["coverage_status"],
                 "signal_classification": item["signal_classification"],
             }
@@ -2184,11 +2347,21 @@ def build_attack_surface_review(
             session_profiles=session_profiles,
             path_rows=path_rows,
         )
+        for entry in role_entries:
+            entry["priority"] = _priority_for_role_boundary(
+                str(entry.get("boundary") or ""),
+                str(entry.get("status") or ""),
+            )
         bug_class_rows = _bug_class_coverage(
             bug_matrix=bug_class_matrix,
             hypotheses=hypotheses,
             role_entries=role_entries,
         )
+        for row in bug_class_rows:
+            row["priority"] = _priority_for_bug_class_gap(
+                str(row.get("bug_class") or ""),
+                str(row.get("status") or ""),
+            )
 
         domain_coverage = {
             "discovered": len(host_rows),
@@ -2367,9 +2540,48 @@ def build_attack_surface_review(
                     host_rows,
                     key=lambda item: (-_priority_rank(str(item["priority"])), item["host"]),
                 )[:max_priorities],
+                "top_services_next": sorted(
+                    [
+                        item
+                        for item in service_rows
+                        if item["signal_classification"] != "out-of-scope"
+                        and item["coverage_status"] != "covered"
+                    ],
+                    key=lambda item: (
+                        -_priority_rank(str(item["priority"])),
+                        item["host"],
+                        int(item["port"]),
+                    ),
+                )[:max_priorities],
+                "top_modules_next": sorted(
+                    [
+                        item
+                        for item in application_rows
+                        if item["signal_classification"] != "out-of-scope"
+                        and item["coverage_status"] != "covered"
+                    ],
+                    key=lambda item: (
+                        -_priority_rank(str(item["priority"])),
+                        item["host"],
+                        item["application_module"],
+                    ),
+                )[:max_priorities],
                 "top_endpoints_next": sorted(
                     path_rows,
                     key=lambda item: (-_priority_rank(str(item["priority"])), item["path"]),
+                )[:max_priorities],
+                "top_objects_next": sorted(
+                    [
+                        item
+                        for item in object_rows
+                        if item["signal_classification"] != "out-of-scope"
+                        and item["coverage_status"] != "covered"
+                    ],
+                    key=lambda item: (
+                        -_priority_rank(str(item["priority"])),
+                        item["host"],
+                        item["object_type"],
+                    ),
                 )[:max_priorities],
                 "top_params_objects": sorted(
                     parameter_rows,
@@ -2386,6 +2598,24 @@ def build_attack_surface_review(
                     ),
                 )[:max_priorities],
                 "top_chain_opportunities": chain_opportunities[:max_priorities],
+                "top_role_boundaries_next": sorted(
+                    [item for item in role_entries if item.get("status") != "covered"],
+                    key=lambda item: (
+                        -_priority_rank(str(item.get("priority") or "normal")),
+                        str(item.get("boundary") or ""),
+                    ),
+                )[:max_priorities],
+                "top_bug_class_gaps_next": sorted(
+                    [
+                        item
+                        for item in bug_class_rows
+                        if str(item.get("status") or "") != "strong coverage"
+                    ],
+                    key=lambda item: (
+                        -_priority_rank(str(item.get("priority") or "normal")),
+                        str(item.get("bug_class") or ""),
+                    ),
+                )[:max_priorities],
                 "top_blind_spots": blind_spots[:max_priorities],
             },
             "attack_surface_graph": {

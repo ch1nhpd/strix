@@ -21,6 +21,28 @@ _agent_instances: dict[str, Any] = {}
 _agent_states: dict[str, Any] = {}
 
 
+def _auto_trigger_orchestration_followup(state: Any, completion_status: str) -> dict[str, Any] | None:
+    if getattr(state, "parent_id", None) is None:
+        return None
+    try:
+        from strix.tools.assessment.assessment_orchestration_actions import (
+            trigger_attack_surface_orchestration_on_child_completion,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return trigger_attack_surface_orchestration_on_child_completion(
+            agent_state=state,
+            completion_status=completion_status,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "triggered": False,
+            "error": f"Failed to auto-trigger orchestration follow-up: {exc}",
+        }
+
+
 def _run_agent_in_thread(
     agent: Any, state: Any, inherited_messages: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -83,19 +105,33 @@ def _run_agent_in_thread(
             loop.close()
 
     except Exception as e:
-        _agent_graph["nodes"][state.agent_id]["status"] = "error"
-        _agent_graph["nodes"][state.agent_id]["finished_at"] = datetime.now(UTC).isoformat()
-        _agent_graph["nodes"][state.agent_id]["result"] = {"error": str(e)}
+        node = _agent_graph["nodes"][state.agent_id]
+        node["status"] = "error"
+        node["finished_at"] = datetime.now(UTC).isoformat()
+        node["result"] = {"error": str(e)}
+        autorun_result = _auto_trigger_orchestration_followup(state, "error")
+        if autorun_result is not None:
+            node["orchestration_autorun"] = autorun_result
         _running_agents.pop(state.agent_id, None)
         _agent_instances.pop(state.agent_id, None)
         raise
     else:
+        node = _agent_graph["nodes"][state.agent_id]
+        existing_status = str(node.get("status") or "").strip().lower()
         if state.stop_requested:
-            _agent_graph["nodes"][state.agent_id]["status"] = "stopped"
+            final_status = "stopped"
+        elif existing_status in {"failed", "stopped"}:
+            final_status = existing_status
         else:
-            _agent_graph["nodes"][state.agent_id]["status"] = "completed"
-        _agent_graph["nodes"][state.agent_id]["finished_at"] = datetime.now(UTC).isoformat()
-        _agent_graph["nodes"][state.agent_id]["result"] = result
+            final_status = "completed"
+        node["status"] = final_status
+        if not node.get("finished_at"):
+            node["finished_at"] = datetime.now(UTC).isoformat()
+        if node.get("result") is None:
+            node["result"] = result
+        autorun_result = _auto_trigger_orchestration_followup(state, final_status)
+        if autorun_result is not None:
+            node["orchestration_autorun"] = autorun_result
         _running_agents.pop(state.agent_id, None)
         _agent_instances.pop(state.agent_id, None)
 
@@ -184,6 +220,99 @@ def view_agent_graph(agent_state: Any) -> dict[str, Any]:
         }
 
 
+def _agent_state_context(agent_state: Any) -> dict[str, Any]:
+    context = getattr(agent_state, "context", None)
+    return dict(context) if isinstance(context, dict) else {}
+
+
+def _agent_state_runtime_snapshot(agent_state: Any) -> dict[str, Any]:
+    direct_snapshot = getattr(agent_state, "runtime_snapshot", None)
+    if isinstance(direct_snapshot, dict):
+        return dict(direct_snapshot)
+
+    context = _agent_state_context(agent_state)
+    for key in (
+        "_recovered_root_runtime_snapshot",
+        "runtime_snapshot",
+        "recovered_runtime_snapshot",
+    ):
+        candidate = context.get(key)
+        if isinstance(candidate, dict):
+            return dict(candidate)
+    return {}
+
+
+def _parent_runtime_defaults(agent_state: Any, parent_agent: Any) -> dict[str, Any]:
+    timeout = None
+    scan_mode = "deep"
+    assessment_objective = "discovery"
+    interactive = False
+    system_prompt_context: dict[str, Any] = {}
+
+    if parent_agent and hasattr(parent_agent, "llm_config"):
+        if hasattr(parent_agent.llm_config, "timeout"):
+            timeout = parent_agent.llm_config.timeout
+        if hasattr(parent_agent.llm_config, "scan_mode"):
+            scan_mode = parent_agent.llm_config.scan_mode
+        if hasattr(parent_agent.llm_config, "assessment_objective"):
+            assessment_objective = parent_agent.llm_config.assessment_objective
+        interactive = getattr(parent_agent.llm_config, "interactive", False)
+        if hasattr(parent_agent, "llm") and hasattr(parent_agent.llm, "_system_prompt_context"):
+            system_prompt_context = dict(
+                getattr(parent_agent.llm, "_system_prompt_context", {})
+            )
+        return {
+            "timeout": timeout,
+            "scan_mode": scan_mode,
+            "assessment_objective": assessment_objective,
+            "interactive": interactive,
+            "system_prompt_context": system_prompt_context,
+        }
+
+    runtime_snapshot = _agent_state_runtime_snapshot(agent_state)
+    runtime = (
+        dict(runtime_snapshot.get("runtime"))
+        if isinstance(runtime_snapshot.get("runtime"), dict)
+        else {}
+    )
+    timeout = runtime.get("timeout")
+    scan_mode = str(runtime.get("scan_mode") or scan_mode)
+    assessment_objective = str(
+        runtime.get("assessment_objective") or assessment_objective
+    )
+    interactive = bool(runtime.get("interactive", interactive))
+    if isinstance(runtime.get("system_prompt_context"), dict):
+        system_prompt_context = dict(runtime.get("system_prompt_context") or {})
+    return {
+        "timeout": timeout,
+        "scan_mode": scan_mode,
+        "assessment_objective": assessment_objective,
+        "interactive": interactive,
+        "system_prompt_context": system_prompt_context,
+    }
+
+
+def _inherited_framework_skills(agent_state: Any) -> list[str]:
+    context = _agent_state_context(agent_state)
+    skill_values = context.get("auto_loaded_framework_skills", [])
+    if not isinstance(skill_values, list):
+        skill_values = []
+
+    if not skill_values:
+        runtime_snapshot = _agent_state_runtime_snapshot(agent_state)
+        runtime_context = runtime_snapshot.get("context")
+        if isinstance(runtime_context, dict):
+            candidate_values = runtime_context.get("auto_loaded_framework_skills", [])
+            if isinstance(candidate_values, list):
+                skill_values = candidate_values
+
+    inherited_skills: list[str] = []
+    for skill in skill_values:
+        if isinstance(skill, str) and skill and skill not in inherited_skills:
+            inherited_skills.append(skill)
+    return inherited_skills
+
+
 @register_tool(sandbox_execution=False)
 def create_agent(
     agent_state: Any,
@@ -212,30 +341,20 @@ def create_agent(
 
         parent_agent = _agent_instances.get(parent_id)
 
-        timeout = None
-        scan_mode = "deep"
-        assessment_objective = "discovery"
-        interactive = False
-        system_prompt_context: dict[str, Any] = {}
-        if parent_agent and hasattr(parent_agent, "llm_config"):
-            if hasattr(parent_agent.llm_config, "timeout"):
-                timeout = parent_agent.llm_config.timeout
-            if hasattr(parent_agent.llm_config, "scan_mode"):
-                scan_mode = parent_agent.llm_config.scan_mode
-            if hasattr(parent_agent.llm_config, "assessment_objective"):
-                assessment_objective = parent_agent.llm_config.assessment_objective
-            interactive = getattr(parent_agent.llm_config, "interactive", False)
-            if hasattr(parent_agent, "llm") and hasattr(parent_agent.llm, "_system_prompt_context"):
-                system_prompt_context = dict(
-                    getattr(parent_agent.llm, "_system_prompt_context", {})
-                )
+        runtime_defaults = _parent_runtime_defaults(agent_state, parent_agent)
+        timeout = runtime_defaults["timeout"]
+        scan_mode = str(runtime_defaults["scan_mode"] or "deep")
+        assessment_objective = str(
+            runtime_defaults["assessment_objective"] or "discovery"
+        )
+        interactive = bool(runtime_defaults["interactive"])
+        system_prompt_context = (
+            dict(runtime_defaults["system_prompt_context"])
+            if isinstance(runtime_defaults["system_prompt_context"], dict)
+            else {}
+        )
 
-        inherited_framework_skills: list[str] = []
-        auto_loaded_framework_skills = agent_state.context.get("auto_loaded_framework_skills", [])
-        if isinstance(auto_loaded_framework_skills, list):
-            inherited_framework_skills = [
-                skill for skill in auto_loaded_framework_skills if isinstance(skill, str) and skill
-            ]
+        inherited_framework_skills = _inherited_framework_skills(agent_state)
 
         merged_skill_list: list[str] = []
         for skill in [*inherited_framework_skills, *skill_list]:

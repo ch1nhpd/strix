@@ -1,0 +1,191 @@
+<tools>
+  <tool name="spawn_attack_surface_agents">
+    <description>Read the latest layered attack-surface review for a target and spawn a phase-based swarm of specialized child agents for host/service/module reconnaissance, endpoint/object validation, chain analysis, and blind-spot reduction. Use this after build_attack_surface_review when the root agent needs to fan out work instead of continuing sequentially.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Logical assessment target label whose latest attack-surface review should be used.</description>
+      </parameter>
+      <parameter name="max_agents" type="integer" required="false">
+        <description>Maximum number of child agents to create from the current review snapshot. Default: 6.</description>
+      </parameter>
+      <parameter name="strategy" type="string" required="false">
+        <description>Agent-allocation strategy. Use balanced for mixed coverage, coverage_first to reserve slots for recon and blind-spot closure, or depth_first to bias toward endpoint validation and chaining. Default: balanced.</description>
+      </parameter>
+      <parameter name="dry_run" type="boolean" required="false">
+        <description>When true, only return the recommended agent batch without creating agents. Default: false.</description>
+      </parameter>
+      <parameter name="inherit_context" type="boolean" required="false">
+        <description>Whether spawned child agents inherit the current conversation history. Default: false.</description>
+      </parameter>
+      <parameter name="include_recon" type="boolean" required="false">
+        <description>Whether to create Phase 1 host, service/port, and app/module surface expansion agents. Default: true.</description>
+      </parameter>
+      <parameter name="include_validation" type="boolean" required="false">
+        <description>Whether to create Phase 2 endpoint, parameter, and object-boundary validation agents. Default: true.</description>
+      </parameter>
+      <parameter name="include_chains" type="boolean" required="false">
+        <description>Whether to create Phase 3 chain-building agents from exposures and mapped chain opportunities. Default: true.</description>
+      </parameter>
+      <parameter name="include_blind_spots" type="boolean" required="false">
+        <description>Whether to create coverage-gap reduction agents from the review blind spots plus role and bug-class coverage gaps. Default: true.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Summary of the review snapshot plus the created or recommended child agents and any skipped duplicates.</description>
+    </returns>
+    <examples>
+      <function=spawn_attack_surface_agents>
+        <parameter=target>web</parameter>
+        <parameter=max_agents>8</parameter>
+        <parameter=strategy>coverage_first</parameter>
+      </function>
+      <function=spawn_attack_surface_agents>
+        <parameter=target>web</parameter>
+        <parameter=max_agents>5</parameter>
+        <parameter=strategy>depth_first</parameter>
+        <parameter=dry_run>true</parameter>
+      </function>
+    </examples>
+  </tool>
+  <tool name="spawn_strong_signal_agents">
+    <description>Read the shared assessment ledger, identify high-signal unresolved hypotheses with supporting evidence, and spawn narrow child agents that validate or deepen those exact signals instead of leaving the root or parent agent to keep digging manually.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Logical assessment target label whose hypotheses and evidence should be mined.</description>
+      </parameter>
+      <parameter name="max_agents" type="integer" required="false">
+        <description>Maximum number of narrow validator agents to create from the strongest current signals. Default: 3.</description>
+      </parameter>
+      <parameter name="hypothesis_ids" type="array" required="false">
+        <description>Optional explicit hypothesis IDs to narrow onto instead of auto-selecting the strongest unresolved signals.</description>
+      </parameter>
+      <parameter name="min_priority" type="string" required="false">
+        <description>Minimum hypothesis priority to consider when auto-selecting signals. Default: high.</description>
+      </parameter>
+      <parameter name="minimum_score" type="integer" required="false">
+        <description>Minimum strong-signal score required when auto-selecting hypotheses. Default: 4.</description>
+      </parameter>
+      <parameter name="dry_run" type="boolean" required="false">
+        <description>When true, only return the recommended signal-followup batch without creating agents. Default: false.</description>
+      </parameter>
+      <parameter name="inherit_context" type="boolean" required="false">
+        <description>Whether spawned child agents inherit the current conversation history. Default: false.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Summary of strong-signal candidates plus the created or recommended validation agents and any skipped duplicates.</description>
+    </returns>
+    <examples>
+      <function=spawn_strong_signal_agents>
+        <parameter=target>web</parameter>
+        <parameter=max_agents>2</parameter>
+      </function>
+      <function=spawn_strong_signal_agents>
+        <parameter=target>web</parameter>
+        <parameter=hypothesis_ids>["hyp_123456789abc"]</parameter>
+        <parameter=dry_run>true</parameter>
+      </function>
+    </examples>
+  </tool>
+  <tool name="spawn_impact_chain_agents">
+    <description>Read the shared assessment ledger and the latest attack-surface review, then spawn dedicated child agents that focus on escalating confirmed or high-signal bugs into higher-impact chains, boundary crossings, and reportable end-to-end narratives.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Logical assessment target label whose hypotheses, evidence, and review pivots should be mined.</description>
+      </parameter>
+      <parameter name="max_agents" type="integer" required="false">
+        <description>Maximum number of impact/chaining agents to create from the strongest current bug signals. Default: 2.</description>
+      </parameter>
+      <parameter name="hypothesis_ids" type="array" required="false">
+        <description>Optional explicit hypothesis IDs to escalate instead of auto-selecting impact-ready bugs.</description>
+      </parameter>
+      <parameter name="min_priority" type="string" required="false">
+        <description>Minimum hypothesis priority to consider when auto-selecting impact candidates. Default: high.</description>
+      </parameter>
+      <parameter name="minimum_score" type="integer" required="false">
+        <description>Minimum impact score required when auto-selecting hypotheses. Default: 6.</description>
+      </parameter>
+      <parameter name="dry_run" type="boolean" required="false">
+        <description>When true, only return the recommended impact/chaining batch without creating agents. Default: false.</description>
+      </parameter>
+      <parameter name="inherit_context" type="boolean" required="false">
+        <description>Whether spawned child agents inherit the current conversation history. Default: false.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Summary of impact-ready candidates plus the created or recommended chaining agents and any skipped duplicates.</description>
+    </returns>
+    <examples>
+      <function=spawn_impact_chain_agents>
+        <parameter=target>web</parameter>
+        <parameter=max_agents>1</parameter>
+      </function>
+      <function=spawn_impact_chain_agents>
+        <parameter=target>web</parameter>
+        <parameter=hypothesis_ids>["hyp_123456789abc"]</parameter>
+        <parameter=inherit_context>true</parameter>
+      </function>
+    </examples>
+  </tool>
+  <tool name="run_attack_surface_orchestration_round">
+    <description>Refresh the latest attack-surface review from current runtime, surface, workflow, and ledger data, then orchestrate the next wave of review, strong-signal, and impact-chain agents from the root subtree. Use this after child agents finish or after new evidence materially changes coverage so orchestration can continue in rounds instead of only at the first fan-out.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Logical assessment target label whose review and ledger should be refreshed.</description>
+      </parameter>
+      <parameter name="scope_targets" type="array" required="false">
+        <description>Optional explicit scope targets to seed the refreshed review. When omitted, the tool infers scope from the current review, runtime inventory, surface artifacts, and workflows.</description>
+      </parameter>
+      <parameter name="max_priorities" type="integer" required="false">
+        <description>Maximum number of priority rows to keep in the refreshed review. Default: 16.</description>
+      </parameter>
+      <parameter name="strategy" type="string" required="false">
+        <description>Swarm allocation strategy for the review fan-out. Default: coverage_first.</description>
+      </parameter>
+      <parameter name="dry_run" type="boolean" required="false">
+        <description>When true, refresh the review but return recommended agent batches without creating agents. Default: false.</description>
+      </parameter>
+      <parameter name="inherit_context" type="boolean" required="false">
+        <description>Whether spawned child agents inherit the current conversation history. Default: true.</description>
+      </parameter>
+      <parameter name="force" type="boolean" required="false">
+        <description>When true, run a new orchestration round even if no new finished descendants or ledger changes were detected. Default: false.</description>
+      </parameter>
+      <parameter name="require_new_data" type="boolean" required="false">
+        <description>When true, skip the round if nothing changed since the last recorded round. Default: true.</description>
+      </parameter>
+      <parameter name="include_review_swarm" type="boolean" required="false">
+        <description>Whether to spawn the refreshed review swarm. Default: true.</description>
+      </parameter>
+      <parameter name="include_signal_swarm" type="boolean" required="false">
+        <description>Whether to spawn strong-signal validator agents after the refresh. Default: true.</description>
+      </parameter>
+      <parameter name="include_impact_swarm" type="boolean" required="false">
+        <description>Whether to spawn impact/chaining agents after the refresh. Default: true.</description>
+      </parameter>
+      <parameter name="max_review_agents" type="integer" required="false">
+        <description>Maximum number of review-phase agents to create in this round. Default: 8.</description>
+      </parameter>
+      <parameter name="max_signal_agents" type="integer" required="false">
+        <description>Maximum number of strong-signal agents to create in this round. Default: 4.</description>
+      </parameter>
+      <parameter name="max_impact_agents" type="integer" required="false">
+        <description>Maximum number of impact/chaining agents to create in this round. Default: 3.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Summary of the refreshed review, change-detection reason, subtree progress snapshot, and the spawned or recommended review/signal/impact waves.</description>
+    </returns>
+    <examples>
+      <function=run_attack_surface_orchestration_round>
+        <parameter=target>web</parameter>
+      </function>
+      <function=run_attack_surface_orchestration_round>
+        <parameter=target>web</parameter>
+        <parameter=strategy>depth_first</parameter>
+        <parameter=dry_run>true</parameter>
+        <parameter=force>true</parameter>
+      </function>
+    </examples>
+  </tool>
+</tools>

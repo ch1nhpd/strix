@@ -15,6 +15,7 @@ from .assessment_session_actions import (
     _redact_mapping,
     save_session_profile,
 )
+from .assessment_validation_actions import _spawn_followup_agents
 
 
 SENSITIVE_KEYWORDS = ("token", "auth", "session", "jwt", "csrf", "xsrf", "api_key", "apikey")
@@ -512,6 +513,7 @@ def confirm_active_artifact_in_browser(
     wait_seconds: float = 1.5,
     open_artifact_directly_if_missing: bool = True,
     persist_hypothesis: bool = True,
+    auto_spawn_impact_agents: bool = True,
 ) -> dict[str, Any]:
     try:
         normalized_target = _normalize_non_empty(target, "target")
@@ -657,6 +659,7 @@ def confirm_active_artifact_in_browser(
         coverage_result = None
         hypothesis_result = None
         evidence_result = None
+        followup_agent_result = None
         if confirmed_execution:
             coverage_result = record_coverage(
                 agent_state=agent_state,
@@ -680,7 +683,7 @@ def confirm_active_artifact_in_browser(
                     target=normalized_target,
                     component=normalized_component,
                     vulnerability_type="xss",
-                    status="open",
+                    status="validated",
                     priority="critical",
                     rationale=(
                         f"Browser instrumentation observed executable client-side behavior for {normalized_surface}."
@@ -717,6 +720,13 @@ def confirm_active_artifact_in_browser(
                     else None
                 ),
             )
+            if auto_spawn_impact_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=normalized_target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_impact=True,
+                )
 
     except (RuntimeError, TypeError, ValueError) as e:
         return {
@@ -741,4 +751,5 @@ def confirm_active_artifact_in_browser(
             "coverage_result": coverage_result,
             "hypothesis_result": hypothesis_result,
             "evidence_result": evidence_result,
+            "followup_agent_result": followup_agent_result,
         }

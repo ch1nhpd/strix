@@ -3503,6 +3503,90 @@ def _build_pipeline_attack_surface_review(
     )
 
 
+def _persist_pipeline_attack_surface_review(
+    agent_state: Any,
+    result: dict[str, Any] | None,
+) -> None:
+    if not isinstance(result, dict) or not result.get("success"):
+        return
+    target = str(result.get("target") or "").strip()
+    report = result.get("report")
+    if not target or not isinstance(report, dict):
+        return
+
+    from . import assessment_surface_review_actions as surface_review_actions
+
+    root_agent_id, store = surface_review_actions._get_surface_review_store(agent_state)
+    surface_review_actions._update_agent_context(agent_state, root_agent_id)
+    store[target] = {
+        "target": target,
+        "updated_at": _utc_now(),
+        "report": report,
+    }
+
+
+def _pipeline_review_agent_limit(max_active_targets: int) -> int:
+    return max(6, min(10, (max_active_targets * 2) + 2))
+
+
+def _pipeline_signal_agent_limit(max_active_targets: int) -> int:
+    return max(2, min(4, max_active_targets + 1))
+
+
+def _pipeline_impact_agent_limit(max_active_targets: int) -> int:
+    return max(1, min(3, max_active_targets))
+
+
+def _spawn_pipeline_attack_surface_agents(
+    agent_state: Any,
+    *,
+    target: str,
+    max_active_targets: int,
+    strategy: str,
+) -> dict[str, Any]:
+    from .assessment_orchestration_actions import spawn_attack_surface_agents
+
+    return spawn_attack_surface_agents(
+        agent_state=agent_state,
+        target=target,
+        max_agents=_pipeline_review_agent_limit(max_active_targets),
+        strategy=strategy,
+        inherit_context=True,
+    )
+
+
+def _spawn_pipeline_strong_signal_agents(
+    agent_state: Any,
+    *,
+    target: str,
+    max_active_targets: int,
+) -> dict[str, Any]:
+    from .assessment_orchestration_actions import spawn_strong_signal_agents
+
+    return spawn_strong_signal_agents(
+        agent_state=agent_state,
+        target=target,
+        max_agents=_pipeline_signal_agent_limit(max_active_targets),
+        inherit_context=True,
+    )
+
+
+def _spawn_pipeline_impact_chain_agents(
+    agent_state: Any,
+    *,
+    target: str,
+    max_active_targets: int,
+) -> dict[str, Any]:
+    from .assessment_orchestration_actions import spawn_impact_chain_agents
+
+    return spawn_impact_chain_agents(
+        agent_state=agent_state,
+        target=target,
+        max_agents=_pipeline_impact_agent_limit(max_active_targets),
+        inherit_context=True,
+    )
+
+
 def _sqlmap_candidate_url(url: str, parameter_name: str) -> str:
     parsed = urlparse(url)
     existing_pairs = parse_qsl(parsed.query, keep_blank_values=True)
@@ -6535,6 +6619,9 @@ def run_security_tool_pipeline(
     max_hypotheses: int = 12,
     reuse_previous_runs: bool = True,
     auto_build_review: bool = True,
+    auto_spawn_review_agents: bool = True,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
     auto_synthesize_hypotheses: bool = True,
 ) -> dict[str, Any]:
     try:
@@ -6594,6 +6681,9 @@ def run_security_tool_pipeline(
         live_urls: list[str] = []
         sqlmap_candidates: list[dict[str, str]] = []
         attack_surface_review_result = None
+        attack_surface_agent_result = None
+        strong_signal_agent_result = None
+        impact_chain_agent_result = None
         enrichment_result = None
 
         def run_step(
@@ -6849,6 +6939,7 @@ def run_security_tool_pipeline(
                 scope_targets=review_scope_targets,
                 max_priorities=max_hypotheses,
             )
+            _persist_pipeline_attack_surface_review(agent_state, attack_surface_review_result)
             review_snapshot = _attack_surface_review_snapshot(attack_surface_review_result) or {}
             _append_pipeline_step(
                 steps,
@@ -6863,6 +6954,98 @@ def run_security_tool_pipeline(
                     ),
                 },
             )
+            if auto_spawn_review_agents and attack_surface_review_result.get("success"):
+                attack_surface_agent_result = _spawn_pipeline_attack_surface_agents(
+                    agent_state=agent_state,
+                    target=normalized_target,
+                    max_active_targets=max_active_targets,
+                    strategy="coverage_first",
+                )
+                _append_pipeline_step(
+                    steps,
+                    step_name="spawn_attack_surface_agents",
+                    result=attack_surface_agent_result,
+                    metadata={
+                        "strategy": "coverage_first",
+                        "max_agents": _pipeline_review_agent_limit(max_active_targets),
+                        "created_count": (
+                            attack_surface_agent_result.get("created_count")
+                            if isinstance(attack_surface_agent_result, dict)
+                            else None
+                        ),
+                        "recommended_count": (
+                            attack_surface_agent_result.get("recommended_count")
+                            if isinstance(attack_surface_agent_result, dict)
+                            else None
+                        ),
+                    },
+                )
+        if auto_spawn_signal_agents:
+            candidate_signal_result = _spawn_pipeline_strong_signal_agents(
+                agent_state=agent_state,
+                target=normalized_target,
+                max_active_targets=max_active_targets,
+            )
+            if (
+                isinstance(candidate_signal_result, dict)
+                and candidate_signal_result.get("success")
+                and (
+                    int(candidate_signal_result.get("recommended_count") or 0) > 0
+                    or int(candidate_signal_result.get("skipped_count") or 0) > 0
+                )
+            ):
+                strong_signal_agent_result = candidate_signal_result
+                _append_pipeline_step(
+                    steps,
+                    step_name="spawn_strong_signal_agents",
+                    result=strong_signal_agent_result,
+                    metadata={
+                        "max_agents": _pipeline_signal_agent_limit(max_active_targets),
+                        "created_count": (
+                            strong_signal_agent_result.get("created_count")
+                            if isinstance(strong_signal_agent_result, dict)
+                            else None
+                        ),
+                        "recommended_count": (
+                            strong_signal_agent_result.get("recommended_count")
+                            if isinstance(strong_signal_agent_result, dict)
+                            else None
+                        ),
+                    },
+                )
+        if auto_spawn_impact_agents:
+            candidate_impact_result = _spawn_pipeline_impact_chain_agents(
+                agent_state=agent_state,
+                target=normalized_target,
+                max_active_targets=max_active_targets,
+            )
+            if (
+                isinstance(candidate_impact_result, dict)
+                and candidate_impact_result.get("success")
+                and (
+                    int(candidate_impact_result.get("recommended_count") or 0) > 0
+                    or int(candidate_impact_result.get("skipped_count") or 0) > 0
+                )
+            ):
+                impact_chain_agent_result = candidate_impact_result
+                _append_pipeline_step(
+                    steps,
+                    step_name="spawn_impact_chain_agents",
+                    result=impact_chain_agent_result,
+                    metadata={
+                        "max_agents": _pipeline_impact_agent_limit(max_active_targets),
+                        "created_count": (
+                            impact_chain_agent_result.get("created_count")
+                            if isinstance(impact_chain_agent_result, dict)
+                            else None
+                        ),
+                        "recommended_count": (
+                            impact_chain_agent_result.get("recommended_count")
+                            if isinstance(impact_chain_agent_result, dict)
+                            else None
+                        ),
+                    },
+                )
         successful_steps = [step for step in steps if step.get("success")]
         run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
         summary_payload = {
@@ -6896,6 +7079,9 @@ def run_security_tool_pipeline(
             "attack_surface_review": _attack_surface_review_snapshot(
                 attack_surface_review_result
             ),
+            "attack_surface_agent_result": attack_surface_agent_result,
+            "strong_signal_agent_result": strong_signal_agent_result,
+            "impact_chain_agent_result": impact_chain_agent_result,
             "synthesized_hypothesis_count": (
                 int(synthesized_result.get("hypothesis_count") or 0)
                 if isinstance(synthesized_result, dict) and synthesized_result.get("success")
@@ -6933,6 +7119,9 @@ def run_security_tool_pipeline(
             "correlated_hypotheses": correlated_hypotheses,
             "auto_followup_results": auto_followup_results,
             "attack_surface_review_result": attack_surface_review_result,
+            "attack_surface_agent_result": attack_surface_agent_result,
+            "strong_signal_agent_result": strong_signal_agent_result,
+            "impact_chain_agent_result": impact_chain_agent_result,
             "synthesized_hypotheses_result": synthesized_result,
             "evidence_result": summary_evidence,
         }
@@ -7387,6 +7576,9 @@ def run_security_focus_pipeline(
     max_hypotheses: int = 12,
     reuse_previous_runs: bool = True,
     auto_build_review: bool = True,
+    auto_spawn_review_agents: bool = True,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
     auto_synthesize_hypotheses: bool = True,
 ) -> dict[str, Any]:
     try:
@@ -7449,6 +7641,9 @@ def run_security_focus_pipeline(
         harness_result = None
         code_sink_result = None
         attack_surface_review_result = None
+        attack_surface_agent_result = None
+        strong_signal_agent_result = None
+        impact_chain_agent_result = None
         enrichment_result = None
         active_probe_results: list[dict[str, Any]] = []
         artifact_retrieval_results: list[dict[str, Any]] = []
@@ -9159,6 +9354,7 @@ def run_security_focus_pipeline(
                 scope_targets=review_scope_targets,
                 max_priorities=max_hypotheses,
             )
+            _persist_pipeline_attack_surface_review(agent_state, attack_surface_review_result)
             review_snapshot = _attack_surface_review_snapshot(attack_surface_review_result) or {}
             _append_pipeline_step(
                 steps,
@@ -9173,6 +9369,98 @@ def run_security_focus_pipeline(
                     ),
                 },
             )
+            if auto_spawn_review_agents and attack_surface_review_result.get("success"):
+                attack_surface_agent_result = _spawn_pipeline_attack_surface_agents(
+                    agent_state=agent_state,
+                    target=normalized_target,
+                    max_active_targets=max_active_targets,
+                    strategy="depth_first",
+                )
+                _append_pipeline_step(
+                    steps,
+                    step_name="spawn_attack_surface_agents",
+                    result=attack_surface_agent_result,
+                    metadata={
+                        "strategy": "depth_first",
+                        "max_agents": _pipeline_review_agent_limit(max_active_targets),
+                        "created_count": (
+                            attack_surface_agent_result.get("created_count")
+                            if isinstance(attack_surface_agent_result, dict)
+                            else None
+                        ),
+                        "recommended_count": (
+                            attack_surface_agent_result.get("recommended_count")
+                            if isinstance(attack_surface_agent_result, dict)
+                            else None
+                        ),
+                    },
+                )
+        if auto_spawn_signal_agents:
+            candidate_signal_result = _spawn_pipeline_strong_signal_agents(
+                agent_state=agent_state,
+                target=normalized_target,
+                max_active_targets=max_active_targets,
+            )
+            if (
+                isinstance(candidate_signal_result, dict)
+                and candidate_signal_result.get("success")
+                and (
+                    int(candidate_signal_result.get("recommended_count") or 0) > 0
+                    or int(candidate_signal_result.get("skipped_count") or 0) > 0
+                )
+            ):
+                strong_signal_agent_result = candidate_signal_result
+                _append_pipeline_step(
+                    steps,
+                    step_name="spawn_strong_signal_agents",
+                    result=strong_signal_agent_result,
+                    metadata={
+                        "max_agents": _pipeline_signal_agent_limit(max_active_targets),
+                        "created_count": (
+                            strong_signal_agent_result.get("created_count")
+                            if isinstance(strong_signal_agent_result, dict)
+                            else None
+                        ),
+                        "recommended_count": (
+                            strong_signal_agent_result.get("recommended_count")
+                            if isinstance(strong_signal_agent_result, dict)
+                            else None
+                        ),
+                    },
+                )
+        if auto_spawn_impact_agents:
+            candidate_impact_result = _spawn_pipeline_impact_chain_agents(
+                agent_state=agent_state,
+                target=normalized_target,
+                max_active_targets=max_active_targets,
+            )
+            if (
+                isinstance(candidate_impact_result, dict)
+                and candidate_impact_result.get("success")
+                and (
+                    int(candidate_impact_result.get("recommended_count") or 0) > 0
+                    or int(candidate_impact_result.get("skipped_count") or 0) > 0
+                )
+            ):
+                impact_chain_agent_result = candidate_impact_result
+                _append_pipeline_step(
+                    steps,
+                    step_name="spawn_impact_chain_agents",
+                    result=impact_chain_agent_result,
+                    metadata={
+                        "max_agents": _pipeline_impact_agent_limit(max_active_targets),
+                        "created_count": (
+                            impact_chain_agent_result.get("created_count")
+                            if isinstance(impact_chain_agent_result, dict)
+                            else None
+                        ),
+                        "recommended_count": (
+                            impact_chain_agent_result.get("recommended_count")
+                            if isinstance(impact_chain_agent_result, dict)
+                            else None
+                        ),
+                    },
+                )
         successful_steps = [step for step in steps if step.get("success")]
         run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
 
@@ -9206,6 +9494,9 @@ def run_security_focus_pipeline(
             "attack_surface_review": _attack_surface_review_snapshot(
                 attack_surface_review_result
             ),
+            "attack_surface_agent_result": attack_surface_agent_result,
+            "strong_signal_agent_result": strong_signal_agent_result,
+            "impact_chain_agent_result": impact_chain_agent_result,
             "steps": steps,
         }
         summary_evidence = record_evidence(
@@ -9240,6 +9531,9 @@ def run_security_focus_pipeline(
             "artifact_retrieval_results": artifact_retrieval_results,
             "correlated_hypotheses": correlated_hypotheses,
             "attack_surface_review_result": attack_surface_review_result,
+            "attack_surface_agent_result": attack_surface_agent_result,
+            "strong_signal_agent_result": strong_signal_agent_result,
+            "impact_chain_agent_result": impact_chain_agent_result,
             "synthesized_hypotheses_result": synthesized_result,
             "steps": steps,
             "evidence_result": summary_evidence,

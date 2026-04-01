@@ -18,6 +18,13 @@ from .assessment_creative_actions import (
 from .assessment_differential_actions import analyze_differential_access
 from .assessment_hunt_actions import run_inventory_differential_hunt
 from .assessment_oob_actions import clear_oob_harness_storage, oob_interaction_harness
+from .assessment_orchestration_actions import (
+    clear_orchestration_round_storage,
+    run_attack_surface_orchestration_round,
+    spawn_attack_surface_agents,
+    spawn_impact_chain_agents,
+    spawn_strong_signal_agents,
+)
 from .assessment_runtime_actions import (
     clear_runtime_inventory_storage,
     list_runtime_inventory,
@@ -72,6 +79,7 @@ __all__ = [
     "bulk_record_coverage",
     "clear_assessment_storage",
     "clear_oob_harness_storage",
+    "clear_orchestration_round_storage",
     "clear_runtime_inventory_storage",
     "clear_session_profile_storage",
     "clear_surface_mining_storage",
@@ -98,6 +106,7 @@ __all__ = [
     "record_coverage",
     "record_evidence",
     "record_hypothesis",
+    "run_attack_surface_orchestration_round",
     "role_matrix_test",
     "run_inventory_differential_hunt",
     "run_security_focus_pipeline",
@@ -107,6 +116,9 @@ __all__ = [
     "security_tool_doctor",
     "seed_coverage_from_scan_config",
     "seed_coverage_from_targets",
+    "spawn_attack_surface_agents",
+    "spawn_impact_chain_agents",
+    "spawn_strong_signal_agents",
     "summarize_bootstrap_for_prompt",
     "synthesize_attack_hypotheses",
     "triage_attack_anomalies",

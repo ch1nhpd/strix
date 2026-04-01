@@ -34,6 +34,12 @@
     <parameter name="success_statuses" required="false">
       <description>Optional list of HTTP status codes to treat as successful access.</description>
     </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, suspicious role-matrix parity results can automatically spawn a narrow validator agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, impact-ready role-matrix parity results can automatically spawn a dedicated impact/chaining agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
   </parameters>
 </tool>
 
@@ -66,6 +72,12 @@
     </parameter>
     <parameter name="success_statuses" required="false">
       <description>Optional list of HTTP status codes to treat as successful outcomes.</description>
+    </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, suspicious race signals can automatically spawn a narrow validation follow-up agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, impact-ready race signals can automatically spawn a dedicated impact/chaining agent when the current execution context supports agent creation. Default: true.</description>
     </parameter>
   </parameters>
 </tool>
@@ -139,6 +151,12 @@
     <parameter name="persist_hypothesis" required="false">
       <description>Whether suspicious anomalies should create a hypothesis in the shared ledger. Default: true.</description>
     </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, suspicious probe results can automatically spawn a narrow validator agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, impact-ready probe results can automatically spawn a dedicated impact/chaining agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
   </parameters>
 </tool>
 
@@ -192,6 +210,12 @@
     </parameter>
     <parameter name="success_statuses" required="false">
       <description>Optional list of HTTP status codes to treat as successful access when comparing forged variants to the baseline.</description>
+    </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, suspicious JWT parity results can automatically spawn a narrow validator agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, impact-ready JWT bypass signals can automatically spawn a dedicated impact/chaining agent when the current execution context supports agent creation. Default: true.</description>
     </parameter>
   </parameters>
 </tool>

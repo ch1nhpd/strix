@@ -24,6 +24,8 @@ from strix.utils.resource_paths import get_strix_resource_path
 
 litellm.drop_params = True
 litellm.modify_params = True
+if not hasattr(litellm, "callbacks"):
+    litellm.callbacks = []
 
 
 class LLMRequestFailedError(Exception):

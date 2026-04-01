@@ -59,7 +59,7 @@ class ChatTextArea(TextArea):  # type: ignore[misc]
     def on_mount(self) -> None:
         self._update_height()
 
-    def _on_key(self, event: events.Key) -> None:
+    async def _on_key(self, event: events.Key) -> None:
         if event.key == "shift+enter":
             self.insert("\n")
             event.prevent_default()
@@ -76,7 +76,7 @@ class ChatTextArea(TextArea):  # type: ignore[misc]
                 event.prevent_default()
                 return
 
-        super()._on_key(event)
+        await super()._on_key(event)
 
     @on(TextArea.Changed)  # type: ignore[misc]
     def _update_height(self, _event: TextArea.Changed | None = None) -> None:

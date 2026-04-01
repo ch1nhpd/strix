@@ -49,6 +49,15 @@
     <parameter name="auto_build_review" required="false">
       <description>When true, automatically build a layered attack-surface review from the resulting runtime, surface, workflow, tool-run, and ledger data after the pipeline completes. Default: true.</description>
     </parameter>
+    <parameter name="auto_spawn_review_agents" required="false">
+      <description>When true, automatically spawn phase-oriented child agents from the latest attack-surface review after the pipeline completes so recon, endpoint validation, chaining, and blind-spot closure fan out without waiting for the root agent to remember. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, automatically spawn narrow child agents for high-signal hypotheses with supporting evidence after the pipeline updates the shared ledger, so strong signals do not stall in the parent agent. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, automatically spawn dedicated impact/chaining child agents for confirmed or impact-ready bug signals after the pipeline updates the shared ledger and review context. Default: true.</description>
+    </parameter>
     <parameter name="auto_synthesize_hypotheses" required="false">
       <description>When true, synthesize additional creative hypotheses from the resulting assessment state after the pipeline completes. Default: true.</description>
     </parameter>
@@ -102,6 +111,15 @@
     </parameter>
     <parameter name="auto_build_review" required="false">
       <description>When true, automatically build a layered attack-surface review from the updated assessment state after the focus pipeline completes. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_review_agents" required="false">
+      <description>When true, automatically spawn phase-oriented child agents from the latest attack-surface review after the focus pipeline completes so the next recon, validation, chain, and blind-spot tasks start immediately. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, automatically spawn narrow child agents for high-signal hypotheses with supporting evidence after the focus pipeline updates the shared ledger, so focused findings can be delegated into even tighter validator agents. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, automatically spawn dedicated impact/chaining child agents for confirmed or impact-ready bug signals after the focus pipeline updates the shared ledger and review context. Default: true.</description>
     </parameter>
     <parameter name="auto_synthesize_hypotheses" required="false">
       <description>When true, synthesize additional creative hypotheses from the resulting assessment state after the focus pipeline completes. Default: true.</description>

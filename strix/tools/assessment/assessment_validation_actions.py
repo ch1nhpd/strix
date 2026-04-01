@@ -32,6 +32,32 @@ ROLE_KEYWORDS = [
     ("anonymous", 0),
     ("unauth", 0),
 ]
+PAYLOAD_IMPACT_READY_ISSUES = {"blind_interaction", "dangerous_variant_acceptance"}
+PAYLOAD_VALIDATED_ISSUES = PAYLOAD_IMPACT_READY_ISSUES | {"semantic_indicator"}
+JWT_IMPACT_READY_STRATEGIES = {
+    "signature_mutation",
+    "empty_signature",
+    "alg_none",
+    "alg_none_claim_escalation",
+}
+RACE_HIGH_IMPACT_KEYWORDS = (
+    "approve",
+    "billing",
+    "cart",
+    "checkout",
+    "claim",
+    "coupon",
+    "credit",
+    "invite",
+    "order",
+    "payment",
+    "redeem",
+    "refund",
+    "reset",
+    "subscription",
+    "transfer",
+    "wallet",
+)
 
 
 def _normalize_request_spec(
@@ -120,6 +146,128 @@ def _normalize_success_statuses(success_statuses: list[int] | None) -> list[int]
             raise ValueError("success_statuses must contain valid HTTP status codes")
         normalized.append(int(status))
     return normalized
+
+
+def _can_spawn_followup_agents(agent_state: Any) -> bool:
+    return bool(
+        getattr(agent_state, "agent_id", None)
+        and callable(getattr(agent_state, "get_conversation_history", None))
+    )
+
+
+def _spawn_followup_agents(
+    agent_state: Any,
+    *,
+    target: str,
+    hypothesis_result: dict[str, Any] | None,
+    prefer_impact: bool = False,
+    prefer_signal: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(hypothesis_result, dict) or not hypothesis_result.get("success"):
+        return None
+    hypothesis_id = str(hypothesis_result.get("hypothesis_id") or "").strip()
+    normalized_target = str(target).strip()
+    if not hypothesis_id or not normalized_target:
+        return None
+    if not _can_spawn_followup_agents(agent_state):
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": "agent spawning unavailable in the current execution context",
+            "hypothesis_id": hypothesis_id,
+        }
+    try:
+        if prefer_impact:
+            from .assessment_orchestration_actions import spawn_impact_chain_agents
+
+            return spawn_impact_chain_agents(
+                agent_state=agent_state,
+                target=normalized_target,
+                hypothesis_ids=[hypothesis_id],
+                max_agents=1,
+                inherit_context=True,
+            )
+        if prefer_signal:
+            from .assessment_orchestration_actions import spawn_strong_signal_agents
+
+            return spawn_strong_signal_agents(
+                agent_state=agent_state,
+                target=normalized_target,
+                hypothesis_ids=[hypothesis_id],
+                max_agents=1,
+                inherit_context=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "error": f"Failed to auto-spawn follow-up agents: {exc}",
+            "hypothesis_id": hypothesis_id,
+        }
+    return None
+
+
+def _payload_probe_followup_decision(
+    vulnerability_type: str,
+    suspicious_observations: list[dict[str, Any]],
+) -> tuple[str, bool]:
+    if not suspicious_observations:
+        return ("none", False)
+    ranked = sorted(
+        suspicious_observations,
+        key=lambda item: int(item.get("score") or 0),
+        reverse=True,
+    )
+    top = ranked[0]
+    top_issue = str(top.get("top_issue_type") or "").strip().lower()
+    top_score = int(top.get("score") or 0)
+    normalized_vulnerability_type = str(vulnerability_type).strip().lower()
+    if (
+        top_issue in PAYLOAD_IMPACT_READY_ISSUES
+        or (
+            top_issue == "semantic_indicator"
+            and normalized_vulnerability_type
+            in {"file_upload", "path_traversal", "rce", "sqli", "ssrf", "ssti", "xxe"}
+        )
+    ):
+        return ("impact", True)
+    if top_issue in PAYLOAD_VALIDATED_ISSUES and top_score >= 8:
+        return ("impact", True)
+    return ("signal", False)
+
+
+def _jwt_followup_decision(suspicious_variants: list[dict[str, Any]]) -> tuple[str, bool]:
+    if not suspicious_variants:
+        return ("none", False)
+    strategies = {
+        str(item.get("strategy") or "").strip().lower()
+        for item in suspicious_variants
+        if isinstance(item, dict)
+    }
+    if strategies & JWT_IMPACT_READY_STRATEGIES:
+        return ("impact", True)
+    return ("signal", False)
+
+
+def _race_followup_decision(
+    *,
+    component: str,
+    surface: str,
+    anomalies: list[dict[str, Any]],
+    expect_single_success: bool,
+) -> tuple[str, bool]:
+    if not anomalies:
+        return ("none", False)
+    anomaly_types = {
+        str(item.get("type") or "").strip().lower()
+        for item in anomalies
+        if isinstance(item, dict)
+    }
+    context_blob = f"{component} {surface}".lower()
+    if "multiple_successes" in anomaly_types and expect_single_success:
+        if any(keyword in context_blob for keyword in RACE_HIGH_IMPACT_KEYWORDS):
+            return ("impact", True)
+        return ("signal", False)
+    return ("signal", False)
 
 
 def _response_preview(response: httpx.Response) -> str:
@@ -217,6 +365,50 @@ def _infer_authz_priority(method: str, suspicious_matches: list[dict[str, Any]])
         if isinstance(lower_rank, int) and isinstance(higher_rank, int) and lower_rank == 0 and higher_rank >= 2:
             return "critical"
     return "high"
+
+
+def _role_matrix_followup_decision(
+    *,
+    method: str,
+    url: str,
+    suspicious_matches: list[dict[str, Any]],
+) -> tuple[str, bool]:
+    if not suspicious_matches:
+        return ("none", False)
+    priority = _infer_authz_priority(method, suspicious_matches)
+    context_blob = " ".join(
+        [
+            str(url or ""),
+            *[
+                " ".join(
+                    [
+                        str(item.get("case") or ""),
+                        str(item.get("baseline_case") or ""),
+                    ]
+                )
+                for item in suspicious_matches
+            ],
+        ]
+    ).lower()
+    impact_ready = priority == "critical" or any(
+        keyword in context_blob
+        for keyword in [
+            "account",
+            "admin",
+            "billing",
+            "checkout",
+            "invite",
+            "mfa",
+            "password",
+            "payment",
+            "refund",
+            "role",
+            "session",
+            "tenant",
+            "wallet",
+        ]
+    )
+    return ("impact" if impact_ready else "signal", True)
 
 
 def _summarize_assessment(
@@ -983,6 +1175,8 @@ def role_matrix_test(
     follow_redirects: bool = False,
     similarity_threshold: float = 0.98,
     success_statuses: list[int] | None = None,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
 ) -> dict[str, Any]:
     try:
         normalized_cases = [
@@ -1102,6 +1296,11 @@ def role_matrix_test(
 
         hypothesis_result = None
         evidence_result = None
+        followup_mode, validated_signal = _role_matrix_followup_decision(
+            method=normalized_method,
+            url=normalized_url,
+            suspicious_matches=suspicious_matches,
+        )
         if suspicious_matches:
             hypothesis_result = record_hypothesis(
                 agent_state=agent_state,
@@ -1112,7 +1311,7 @@ def role_matrix_test(
                 target=target,
                 component=component,
                 vulnerability_type="authorization",
-                status="open",
+                status="validated" if validated_signal else "open",
                 priority=coverage_priority,
                 rationale=coverage_rationale,
             )
@@ -1151,6 +1350,29 @@ def role_matrix_test(
                 component=component,
                 related_coverage_id=coverage_result.get("coverage_id"),
             )
+        followup_agent_result = None
+        if followup_mode == "impact":
+            if auto_spawn_impact_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_impact=True,
+                )
+            elif auto_spawn_signal_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_signal=True,
+                )
+        elif followup_mode == "signal" and auto_spawn_signal_agents:
+            followup_agent_result = _spawn_followup_agents(
+                agent_state,
+                target=target,
+                hypothesis_result=hypothesis_result,
+                prefer_signal=True,
+            )
 
     except (TypeError, ValueError) as e:
         return {"success": False, "error": f"Failed to run role_matrix_test: {e}"}
@@ -1164,6 +1386,7 @@ def role_matrix_test(
             "coverage_result": coverage_result,
             "hypothesis_result": hypothesis_result,
             "evidence_result": evidence_result,
+            "followup_agent_result": followup_agent_result,
             "assessment_summary": _summarize_assessment(
                 coverage_result,
                 hypothesis_result,
@@ -1197,6 +1420,8 @@ def payload_probe_harness(
     oob_poll_interval: int = 5,
     min_anomaly_score: int = 4,
     persist_hypothesis: bool = True,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
 ) -> dict[str, Any]:
     try:
         from .assessment_creative_actions import (
@@ -1357,11 +1582,20 @@ def payload_probe_harness(
             min_score=min_anomaly_score,
             persist_hypothesis=persist_hypothesis,
         )
+        suspicious_observations = list(
+            triage_result.get("suspicious_observations", [])
+            if isinstance(triage_result, dict)
+            else []
+        )
+        followup_mode, validated_signal = _payload_probe_followup_decision(
+            normalized_vulnerability_type,
+            suspicious_observations,
+        )
         targeted_hypothesis_result = None
         if (
             persist_hypothesis
             and isinstance(triage_result, dict)
-            and triage_result.get("suspicious_observations")
+            and suspicious_observations
         ):
             triage_priority = str(
                 triage_result.get("coverage_result", {})
@@ -1377,7 +1611,7 @@ def payload_probe_harness(
                 target=normalized_target,
                 component=normalized_component,
                 vulnerability_type=normalized_vulnerability_type,
-                status="open",
+                status="validated" if validated_signal else "open",
                 priority=triage_priority,
                 rationale=(
                     f"Payload probe harness observed high-signal anomalies while mutating "
@@ -1418,6 +1652,38 @@ def payload_probe_harness(
                 )
             ),
         )
+        followup_agent_result = None
+        followup_hypothesis_result = (
+            targeted_hypothesis_result
+            if isinstance(targeted_hypothesis_result, dict)
+            else (
+                triage_result.get("hypothesis_result")
+                if isinstance(triage_result, dict)
+                else None
+            )
+        )
+        if followup_mode == "impact":
+            if auto_spawn_impact_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=normalized_target,
+                    hypothesis_result=followup_hypothesis_result,
+                    prefer_impact=True,
+                )
+            elif auto_spawn_signal_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=normalized_target,
+                    hypothesis_result=followup_hypothesis_result,
+                    prefer_signal=True,
+                )
+        elif followup_mode == "signal" and auto_spawn_signal_agents:
+            followup_agent_result = _spawn_followup_agents(
+                agent_state,
+                target=normalized_target,
+                hypothesis_result=followup_hypothesis_result,
+                prefer_signal=True,
+            )
 
     except (TypeError, ValueError) as e:
         return {"success": False, "error": f"Failed to run payload_probe_harness: {e}"}
@@ -1435,6 +1701,7 @@ def payload_probe_harness(
             "targeted_hypothesis_result": targeted_hypothesis_result,
             "oob_result": oob_result,
             "evidence_result": evidence_result,
+            "followup_agent_result": followup_agent_result,
             "finding_count": len(
                 triage_result.get("suspicious_observations", [])
                 if isinstance(triage_result, dict)
@@ -1462,6 +1729,8 @@ def jwt_variant_harness(
     follow_redirects: bool = False,
     similarity_threshold: float = 0.98,
     success_statuses: list[int] | None = None,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
 ) -> dict[str, Any]:
     try:
         normalized_target = str(target).strip()
@@ -1592,6 +1861,7 @@ def jwt_variant_harness(
         )
 
         hypothesis_result = None
+        followup_mode, validated_signal = _jwt_followup_decision(suspicious_variants)
         if suspicious_variants:
             hypothesis_result = record_hypothesis(
                 agent_state=agent_state,
@@ -1599,7 +1869,7 @@ def jwt_variant_harness(
                 target=normalized_target,
                 component=normalized_component,
                 vulnerability_type="jwt",
-                status="open",
+                status="validated" if validated_signal else "open",
                 priority=coverage_priority,
                 rationale=coverage_rationale,
             )
@@ -1626,6 +1896,29 @@ def jwt_variant_harness(
                 else None
             ),
         )
+        followup_agent_result = None
+        if followup_mode == "impact":
+            if auto_spawn_impact_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=normalized_target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_impact=True,
+                )
+            elif auto_spawn_signal_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=normalized_target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_signal=True,
+                )
+        elif followup_mode == "signal" and auto_spawn_signal_agents:
+            followup_agent_result = _spawn_followup_agents(
+                agent_state,
+                target=normalized_target,
+                hypothesis_result=hypothesis_result,
+                prefer_signal=True,
+            )
 
     except (TypeError, ValueError) as e:
         return {"success": False, "error": f"Failed to run jwt_variant_harness: {e}"}
@@ -1640,6 +1933,7 @@ def jwt_variant_harness(
             "coverage_result": coverage_result,
             "hypothesis_result": hypothesis_result,
             "evidence_result": evidence_result,
+            "followup_agent_result": followup_agent_result,
             "assessment_summary": _summarize_assessment(
                 coverage_result,
                 hypothesis_result,
@@ -1660,6 +1954,8 @@ def race_condition_harness(
     follow_redirects: bool = False,
     expect_single_success: bool = False,
     success_statuses: list[int] | None = None,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
 ) -> dict[str, Any]:
     try:
         if iterations < 1:
@@ -1789,6 +2085,12 @@ def race_condition_harness(
 
         hypothesis_result = None
         evidence_result = None
+        followup_mode, validated_signal = _race_followup_decision(
+            component=component,
+            surface=surface,
+            anomalies=anomalies,
+            expect_single_success=expect_single_success,
+        )
         if anomalies:
             hypothesis_result = record_hypothesis(
                 agent_state=agent_state,
@@ -1796,7 +2098,7 @@ def race_condition_harness(
                 target=target,
                 component=component,
                 vulnerability_type="race_condition",
-                status="open",
+                status="validated" if validated_signal else "open",
                 priority=coverage_priority,
                 rationale=coverage_rationale,
             )
@@ -1830,6 +2132,29 @@ def race_condition_harness(
                 component=component,
                 related_coverage_id=coverage_result.get("coverage_id"),
             )
+        followup_agent_result = None
+        if followup_mode == "impact":
+            if auto_spawn_impact_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_impact=True,
+                )
+            elif auto_spawn_signal_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_signal=True,
+                )
+        elif followup_mode == "signal" and auto_spawn_signal_agents:
+            followup_agent_result = _spawn_followup_agents(
+                agent_state,
+                target=target,
+                hypothesis_result=hypothesis_result,
+                prefer_signal=True,
+            )
 
     except (TypeError, ValueError) as e:
         return {"success": False, "error": f"Failed to run race_condition_harness: {e}"}
@@ -1841,6 +2166,7 @@ def race_condition_harness(
             "coverage_result": coverage_result,
             "hypothesis_result": hypothesis_result,
             "evidence_result": evidence_result,
+            "followup_agent_result": followup_agent_result,
             "assessment_summary": _summarize_assessment(
                 coverage_result,
                 hypothesis_result,

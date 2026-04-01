@@ -61,5 +61,8 @@
     <parameter name="persist_hypothesis" required="false">
       <description>Whether confirmed browser execution should create a stored XSS hypothesis. Default: true.</description>
     </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, confirmed browser execution can automatically spawn a dedicated impact/chaining agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
   </parameters>
 </tool>

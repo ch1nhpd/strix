@@ -15,6 +15,7 @@ sys.modules.setdefault("strix.telemetry.posthog", fake_posthog)
 from strix.tools.agents_graph import agents_graph_actions
 from strix.tools.assessment import clear_assessment_storage, list_assessment_state
 from strix.tools.assessment import assessment_oob_actions as oob_actions
+from strix.tools.assessment import assessment_orchestration_actions as orchestration_actions
 from strix.tools.assessment import assessment_validation_actions as validation_actions
 
 
@@ -26,6 +27,11 @@ class DummyState:
 
     def update_context(self, key: str, value: Any) -> None:
         self.context[key] = value
+
+
+class SpawnCapableState(DummyState):
+    def get_conversation_history(self) -> list[dict[str, Any]]:
+        return []
 
 
 def setup_function() -> None:
@@ -88,6 +94,81 @@ def test_role_matrix_test_records_suspicious_parity(monkeypatch: Any) -> None:
     assert result["coverage_result"]["record"]["status"] == "in_progress"
     assert ledger["assessment_summary"]["hypothesis_total"] == 1
     assert ledger["assessment_summary"]["evidence_total"] == 1
+
+
+def test_role_matrix_test_auto_spawns_impact_agent_for_guest_admin_parity(
+    monkeypatch: Any,
+) -> None:
+    responses = {
+        "guest": {
+            "name": "guest",
+            "method": "GET",
+            "url": "https://app.test/admin/users",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_length": 32,
+            "body_hash": "samehash",
+            "body_preview": '{"users":[{"id":1}]}',
+            "elapsed_ms": 10,
+        },
+        "admin": {
+            "name": "admin",
+            "method": "GET",
+            "url": "https://app.test/admin/users",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_length": 32,
+            "body_hash": "samehash",
+            "body_preview": '{"users":[{"id":1}]}',
+            "elapsed_ms": 12,
+        },
+    }
+    spawn_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        validation_actions,
+        "_execute_request",
+        lambda spec, timeout, follow_redirects: responses[spec["name"]],
+    )
+    monkeypatch.setattr(
+        orchestration_actions,
+        "spawn_impact_chain_agents",
+        lambda agent_state, target, hypothesis_ids, max_agents, inherit_context: spawn_calls.append(
+            {
+                "target": target,
+                "hypothesis_ids": hypothesis_ids,
+                "max_agents": max_agents,
+                "inherit_context": inherit_context,
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "created_count": 1,
+            "hypothesis_ids": hypothesis_ids,
+        },
+    )
+
+    state = SpawnCapableState("agent_root")
+    result = validation_actions.role_matrix_test(
+        agent_state=state,
+        target="web",
+        component="admin",
+        surface="Admin authorization matrix",
+        method="GET",
+        url="https://app.test/admin/users",
+        cases=[
+            {"name": "guest", "method": "GET", "url": "https://app.test/admin/users"},
+            {"name": "admin", "method": "GET", "url": "https://app.test/admin/users"},
+        ],
+        baseline_case="admin",
+    )
+
+    assert result["success"] is True
+    assert result["hypothesis_result"]["record"]["status"] == "validated"
+    assert result["followup_agent_result"]["success"] is True
+    assert spawn_calls[0]["target"] == "web"
+    assert spawn_calls[0]["hypothesis_ids"] == [result["hypothesis_result"]["hypothesis_id"]]
 
 
 def test_race_condition_harness_records_multiple_successes(monkeypatch: Any) -> None:
@@ -564,6 +645,91 @@ def test_jwt_variant_harness_flags_forged_token_parity(monkeypatch: Any) -> None
     assert any(item["name"] == "invalid_signature" for item in result["suspicious_variants"])
     assert result["coverage_result"]["record"]["status"] == "in_progress"
     assert any(item["vulnerability_type"] == "jwt" for item in ledger["hypotheses"])
+
+
+def test_jwt_variant_harness_auto_spawns_impact_agent_for_signature_bypass(
+    monkeypatch: Any,
+) -> None:
+    def fake_execute_request(spec: dict[str, Any], *, timeout: int, follow_redirects: bool) -> dict[str, Any]:
+        if spec["name"] == "baseline_valid":
+            return {
+                "name": spec["name"],
+                "method": spec["method"],
+                "url": spec["url"],
+                "status_code": 200,
+                "content_type": "application/json",
+                "body_length": 30,
+                "body_hash": "samehash",
+                "body_preview": '{"sub":"1","role":"user"}',
+                "elapsed_ms": 75,
+            }
+        if spec["name"] == "invalid_signature":
+            return {
+                "name": spec["name"],
+                "method": spec["method"],
+                "url": spec["url"],
+                "status_code": 200,
+                "content_type": "application/json",
+                "body_length": 30,
+                "body_hash": "samehash",
+                "body_preview": '{"sub":"1","role":"user"}',
+                "elapsed_ms": 80,
+            }
+        return {
+            "name": spec["name"],
+            "method": spec["method"],
+            "url": spec["url"],
+            "status_code": 401,
+            "content_type": "application/json",
+            "body_length": 16,
+            "body_hash": "deny",
+            "body_preview": '{"error":"auth"}',
+            "elapsed_ms": 60,
+        }
+
+    spawn_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(validation_actions, "_execute_request", fake_execute_request)
+    monkeypatch.setattr(
+        orchestration_actions,
+        "spawn_impact_chain_agents",
+        lambda agent_state, target, hypothesis_ids, max_agents, inherit_context: spawn_calls.append(
+            {
+                "target": target,
+                "hypothesis_ids": hypothesis_ids,
+                "max_agents": max_agents,
+                "inherit_context": inherit_context,
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "created_count": 1,
+            "hypothesis_ids": hypothesis_ids,
+        },
+    )
+
+    state = SpawnCapableState("agent_root")
+    token = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJzdWIiOiIxIiwicm9sZSI6InVzZXIifQ."
+        "signature"
+    )
+    result = validation_actions.jwt_variant_harness(
+        agent_state=state,
+        target="web",
+        component="auth",
+        surface="Profile JWT validation",
+        base_request={"method": "GET", "url": "https://app.test/api/profile"},
+        jwt_token=token,
+    )
+
+    assert result["success"] is True
+    assert result["hypothesis_result"]["record"]["status"] == "validated"
+    assert result["followup_agent_result"]["success"] is True
+    assert spawn_calls[0]["target"] == "web"
+    assert spawn_calls[0]["max_agents"] == 1
+    assert spawn_calls[0]["inherit_context"] is True
+    assert spawn_calls[0]["hypothesis_ids"] == [result["hypothesis_result"]["hypothesis_id"]]
 
 
 def test_jwt_variant_harness_supports_cookie_tokens(monkeypatch: Any) -> None:

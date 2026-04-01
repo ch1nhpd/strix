@@ -47,6 +47,10 @@ def clear_assessment_storage() -> None:
         from .assessment_toolchain_actions import clear_tool_scan_storage
     except ImportError:
         clear_tool_scan_storage = None
+    try:
+        from .assessment_orchestration_actions import clear_orchestration_round_storage
+    except ImportError:
+        clear_orchestration_round_storage = None
     if clear_session_profile_storage is not None:
         clear_session_profile_storage()
     if clear_oob_harness_storage is not None:
@@ -61,6 +65,8 @@ def clear_assessment_storage() -> None:
         clear_workflow_storage()
     if clear_tool_scan_storage is not None:
         clear_tool_scan_storage()
+    if clear_orchestration_round_storage is not None:
+        clear_orchestration_round_storage()
 
 
 def _utc_now() -> str:

@@ -157,6 +157,31 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
             },
         },
     )
+    spawn_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_spawn_pipeline_attack_surface_agents",
+        lambda agent_state, target, max_active_targets, strategy: spawn_calls.append(
+            {
+                "agent_state": agent_state,
+                "target": target,
+                "max_active_targets": max_active_targets,
+                "strategy": strategy,
+                "max_agents": toolchain_actions._pipeline_review_agent_limit(max_active_targets),
+                "inherit_context": True,
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "recommended_count": 4,
+            "created_count": 4,
+            "skipped_count": 0,
+            "dry_run": False,
+            "created_agents": [],
+            "skipped_agents": [],
+        },
+    )
 
     def fake_run_security_tool_scan(agent_state: Any, tool_name: str, target: str, **kwargs: Any) -> dict[str, Any]:
         calls.append((tool_name, kwargs))
@@ -230,8 +255,13 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
         "https://admin.example.com/admin",
         "https://api.example.com/graphql",
     ]
-    assert result["step_count"] == 12
+    assert result["step_count"] == 13
     assert result["attack_surface_review_result"]["success"] is True
+    assert result["attack_surface_agent_result"]["success"] is True
+    assert spawn_calls[0]["target"] == "external"
+    assert spawn_calls[0]["strategy"] == "coverage_first"
+    assert spawn_calls[0]["max_agents"] == 6
+    assert spawn_calls[0]["inherit_context"] is True
     assert review_calls[0]["scope_targets"] == [
         "example.com",
         "api.example.com",
@@ -1437,6 +1467,7 @@ def test_run_security_tool_pipeline_auto_escalates_workflow_race_followup(
 
 def test_run_security_focus_pipeline_auto_builds_attack_surface_review(monkeypatch: Any) -> None:
     review_calls: list[dict[str, Any]] = []
+    spawn_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         toolchain_actions,
         "security_tool_doctor",
@@ -1459,6 +1490,29 @@ def test_run_security_focus_pipeline_auto_builds_attack_surface_review(monkeypat
             },
         },
     )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_spawn_pipeline_attack_surface_agents",
+        lambda agent_state, target, max_active_targets, strategy: spawn_calls.append(
+            {
+                "agent_state": agent_state,
+                "target": target,
+                "max_active_targets": max_active_targets,
+                "strategy": strategy,
+                "max_agents": toolchain_actions._pipeline_review_agent_limit(max_active_targets),
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "recommended_count": 2,
+            "created_count": 2,
+            "skipped_count": 0,
+            "dry_run": False,
+            "created_agents": [],
+            "skipped_agents": [],
+        },
+    )
 
     state = DummyState("agent_root")
     result = toolchain_actions.run_security_focus_pipeline(
@@ -1471,8 +1525,289 @@ def test_run_security_focus_pipeline_auto_builds_attack_surface_review(monkeypat
 
     assert result["success"] is True
     assert result["attack_surface_review_result"]["success"] is True
+    assert result["attack_surface_agent_result"]["success"] is True
     assert any(step["step"] == "build_attack_surface_review" for step in result["steps"])
+    assert any(step["step"] == "spawn_attack_surface_agents" for step in result["steps"])
     assert review_calls[0]["scope_targets"] == ["https://app.test/account"]
+    assert spawn_calls[0]["target"] == "focus-target"
+    assert spawn_calls[0]["strategy"] == "depth_first"
+    assert spawn_calls[0]["max_agents"] == 8
+
+
+def test_run_security_tool_pipeline_auto_spawns_impact_chain_agents(monkeypatch: Any) -> None:
+    impact_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [{"tool_name": "httpx", "available": True, "executable": "httpx"}],
+        },
+    )
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": False},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_spawn_pipeline_impact_chain_agents",
+        lambda agent_state, target, max_active_targets: impact_calls.append(
+            {
+                "agent_state": agent_state,
+                "target": target,
+                "max_active_targets": max_active_targets,
+                "max_agents": toolchain_actions._pipeline_impact_agent_limit(max_active_targets),
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "recommended_count": 1,
+            "created_count": 1,
+            "skipped_count": 0,
+            "created_agents": [{"agent_id": "agent_chain"}],
+            "skipped_agents": [],
+        },
+    )
+
+    def fake_run_security_tool_scan(agent_state: Any, tool_name: str, target: str, **kwargs: Any) -> dict[str, Any]:
+        findings = [{"url": "https://app.test", "status_code": 200}] if tool_name == "httpx" else []
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": len(findings),
+            "discovery_seed_count": len(findings),
+            "hypothesis_seed_count": 0,
+            "findings": findings,
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["impact_chain_agent_result"]["success"] is True
+    assert impact_calls[0]["target"] == "web"
+    assert impact_calls[0]["max_agents"] == 3
+    assert any(step["step"] == "spawn_impact_chain_agents" for step in result["steps"])
+
+
+def test_run_security_tool_pipeline_auto_spawns_strong_signal_agents(monkeypatch: Any) -> None:
+    signal_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [{"tool_name": "httpx", "available": True, "executable": "httpx"}],
+        },
+    )
+    monkeypatch.setattr(
+        surface_review_actions,
+        "build_attack_surface_review",
+        lambda **kwargs: {
+            "success": True,
+            "target": kwargs["target"],
+            "report": {
+                "summary": {"needs_more_data": False},
+                "priorities": {
+                    "top_targets_next": [],
+                    "top_endpoints_next": [],
+                    "top_blind_spots": [],
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_spawn_pipeline_strong_signal_agents",
+        lambda agent_state, target, max_active_targets: signal_calls.append(
+            {
+                "agent_state": agent_state,
+                "target": target,
+                "max_active_targets": max_active_targets,
+                "max_agents": toolchain_actions._pipeline_signal_agent_limit(max_active_targets),
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "recommended_count": 1,
+            "created_count": 1,
+            "skipped_count": 0,
+            "created_agents": [{"agent_id": "agent_signal"}],
+            "skipped_agents": [],
+        },
+    )
+
+    def fake_run_security_tool_scan(agent_state: Any, tool_name: str, target: str, **kwargs: Any) -> dict[str, Any]:
+        findings = [{"url": "https://app.test", "status_code": 200}] if tool_name == "httpx" else []
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": len(findings),
+            "discovery_seed_count": len(findings),
+            "hypothesis_seed_count": 0,
+            "findings": findings,
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        auto_spawn_review_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["strong_signal_agent_result"]["success"] is True
+    assert signal_calls[0]["target"] == "web"
+    assert signal_calls[0]["max_agents"] == 4
+    assert any(step["step"] == "spawn_strong_signal_agents" for step in result["steps"])
+
+
+def test_run_security_focus_pipeline_auto_spawns_impact_chain_agents(monkeypatch: Any) -> None:
+    impact_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_spawn_pipeline_impact_chain_agents",
+        lambda agent_state, target, max_active_targets: impact_calls.append(
+            {
+                "agent_state": agent_state,
+                "target": target,
+                "max_active_targets": max_active_targets,
+                "max_agents": toolchain_actions._pipeline_impact_agent_limit(max_active_targets),
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "recommended_count": 1,
+            "created_count": 1,
+            "skipped_count": 0,
+            "created_agents": [{"agent_id": "agent_chain"}],
+            "skipped_agents": [],
+        },
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="focus-target",
+        focus="authz",
+        url="https://app.test/account",
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["impact_chain_agent_result"]["success"] is True
+    assert impact_calls[0]["target"] == "focus-target"
+    assert impact_calls[0]["max_agents"] == 3
+    assert any(step["step"] == "spawn_impact_chain_agents" for step in result["steps"])
+
+
+def test_run_security_focus_pipeline_auto_spawns_strong_signal_agents(monkeypatch: Any) -> None:
+    signal_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_spawn_pipeline_strong_signal_agents",
+        lambda agent_state, target, max_active_targets: signal_calls.append(
+            {
+                "agent_state": agent_state,
+                "target": target,
+                "max_active_targets": max_active_targets,
+                "max_agents": toolchain_actions._pipeline_signal_agent_limit(max_active_targets),
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "recommended_count": 1,
+            "created_count": 1,
+            "skipped_count": 0,
+            "created_agents": [{"agent_id": "agent_signal"}],
+            "skipped_agents": [],
+        },
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="focus-target",
+        focus="authz",
+        url="https://app.test/account",
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["strong_signal_agent_result"]["success"] is True
+    assert signal_calls[0]["target"] == "focus-target"
+    assert signal_calls[0]["max_agents"] == 4
+    assert any(step["step"] == "spawn_strong_signal_agents" for step in result["steps"])
 
 
 def test_run_security_focus_pipeline_uses_surface_artifact_candidate_urls(
@@ -3194,5 +3529,5 @@ def test_run_security_tool_pipeline_hybrid_includes_repo_scans(monkeypatch: Any)
         "trivy",
         "trufflehog",
     ]
-    assert result["step_count"] == 10
+    assert result["step_count"] == 11
     assert result["attack_surface_review_result"]["success"] is True

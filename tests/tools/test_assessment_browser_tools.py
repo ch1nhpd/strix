@@ -16,6 +16,7 @@ sys.modules.setdefault("strix.telemetry.posthog", fake_posthog)
 from strix.tools.agents_graph import agents_graph_actions
 from strix.tools.assessment import clear_assessment_storage, list_assessment_state
 from strix.tools.assessment import assessment_browser_actions as browser_assessment_actions
+from strix.tools.assessment import assessment_orchestration_actions as orchestration_actions
 from strix.tools.assessment import assessment_session_actions as session_actions
 
 
@@ -27,6 +28,11 @@ class DummyState:
 
     def update_context(self, key: str, value: Any) -> None:
         self.context[key] = value
+
+
+class SpawnCapableState(DummyState):
+    def get_conversation_history(self) -> list[dict[str, Any]]:
+        return []
 
 
 class FakePage:
@@ -268,3 +274,49 @@ def test_confirm_active_artifact_in_browser_replays_viewer_url(monkeypatch: Any)
     assert result["confirmed_execution"] is True
     assert result["execution_context_url"] == "https://app.test/profile"
     assert result["workflow_replay_results"][0]["viewer_url"] == "https://app.test/profile"
+
+
+def test_confirm_active_artifact_in_browser_auto_spawns_impact_agent(
+    monkeypatch: Any,
+) -> None:
+    spawn_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "_browser_manager",
+        lambda: FakeArtifactBrowserManager(),
+    )
+    monkeypatch.setattr(
+        orchestration_actions,
+        "spawn_impact_chain_agents",
+        lambda agent_state, target, hypothesis_ids, max_agents, inherit_context: spawn_calls.append(
+            {
+                "target": target,
+                "hypothesis_ids": hypothesis_ids,
+                "max_agents": max_agents,
+                "inherit_context": inherit_context,
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "created_count": 1,
+            "hypothesis_ids": hypothesis_ids,
+        },
+    )
+
+    state = SpawnCapableState("agent_root")
+    result = browser_assessment_actions.confirm_active_artifact_in_browser(
+        agent_state=state,
+        target="web",
+        component="focus:file_upload:app.test/uploads/avatar.svg:browser",
+        surface="Browser execution proof for uploaded SVG",
+        url="https://app.test/uploads/avatar.svg",
+        expected_dom_markers=["<svg", "onload="],
+    )
+
+    assert result["success"] is True
+    assert result["hypothesis_result"]["record"]["status"] == "validated"
+    assert result["followup_agent_result"]["success"] is True
+    assert spawn_calls[0]["target"] == "web"
+    assert spawn_calls[0]["hypothesis_ids"] == [result["hypothesis_result"]["hypothesis_id"]]

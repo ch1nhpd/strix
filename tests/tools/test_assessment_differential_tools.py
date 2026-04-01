@@ -15,6 +15,7 @@ sys.modules.setdefault("strix.telemetry.posthog", fake_posthog)
 from strix.tools.agents_graph import agents_graph_actions
 from strix.tools.assessment import clear_assessment_storage, list_assessment_state
 from strix.tools.assessment import assessment_differential_actions as differential_actions
+from strix.tools.assessment import assessment_orchestration_actions as orchestration_actions
 
 
 class DummyState:
@@ -25,6 +26,11 @@ class DummyState:
 
     def update_context(self, key: str, value: Any) -> None:
         self.context[key] = value
+
+
+class SpawnCapableState(DummyState):
+    def get_conversation_history(self) -> list[dict[str, Any]]:
+        return []
 
 
 def setup_function() -> None:
@@ -108,6 +114,96 @@ def test_analyze_differential_access_records_cross_tenant_parity(monkeypatch: An
     assert result["coverage_result"]["record"]["status"] == "in_progress"
     assert ledger["assessment_summary"]["hypothesis_total"] == 1
     assert ledger["assessment_summary"]["evidence_total"] == 1
+
+
+def test_analyze_differential_access_auto_spawns_impact_agent(monkeypatch: Any) -> None:
+    responses = {
+        "owner_allow": {
+            "name": "owner_allow",
+            "method": "POST",
+            "url": "https://app.test/orders/123/refund",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_length": 32,
+            "body_hash": "samehash",
+            "body_preview": '{"id":123,"tenant":"a"}',
+            "elapsed_ms": 10,
+            "location": "https://app.test/orders/123/refund",
+        },
+        "other_tenant_deny": {
+            "name": "other_tenant_deny",
+            "method": "POST",
+            "url": "https://app.test/orders/123/refund",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_length": 32,
+            "body_hash": "samehash",
+            "body_preview": '{"id":123,"tenant":"a"}',
+            "elapsed_ms": 12,
+            "location": "https://app.test/orders/123/refund",
+        },
+    }
+    spawn_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        differential_actions,
+        "_execute_request",
+        lambda spec, timeout, follow_redirects: responses[spec["name"]],
+    )
+    monkeypatch.setattr(
+        orchestration_actions,
+        "spawn_impact_chain_agents",
+        lambda agent_state, target, hypothesis_ids, max_agents, inherit_context: spawn_calls.append(
+            {
+                "target": target,
+                "hypothesis_ids": hypothesis_ids,
+                "max_agents": max_agents,
+                "inherit_context": inherit_context,
+            }
+        )
+        or {
+            "success": True,
+            "target": target,
+            "created_count": 1,
+            "hypothesis_ids": hypothesis_ids,
+        },
+    )
+
+    state = SpawnCapableState("agent_root")
+    result = differential_actions.analyze_differential_access(
+        agent_state=state,
+        target="web",
+        component="refunds",
+        surface="Refund differential access",
+        method="POST",
+        url="https://app.test/orders/123/refund",
+        baseline_case="owner_allow",
+        cases=[
+            {
+                "name": "owner_allow",
+                "method": "POST",
+                "url": "https://app.test/orders/123/refund",
+                "expected_access": "allow",
+                "tenant": "tenant-a",
+                "role": "owner",
+            },
+            {
+                "name": "other_tenant_deny",
+                "method": "POST",
+                "url": "https://app.test/orders/123/refund",
+                "expected_access": "deny",
+                "tenant": "tenant-b",
+                "role": "user",
+                "compare_to": "owner_allow",
+            },
+        ],
+    )
+
+    assert result["success"] is True
+    assert result["hypothesis_result"]["record"]["status"] == "validated"
+    assert result["followup_agent_result"]["success"] is True
+    assert spawn_calls[0]["target"] == "web"
+    assert spawn_calls[0]["hypothesis_ids"] == [result["hypothesis_result"]["hypothesis_id"]]
 
 
 def test_analyze_differential_access_ignores_low_signal_success_without_parity(

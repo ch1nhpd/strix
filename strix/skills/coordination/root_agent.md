@@ -25,6 +25,18 @@ Before spawning agents, analyze the target:
 3. **Determine approach** - blackbox, greybox, or whitebox assessment
 4. **Prioritize by risk** - critical assets and high-value targets first
 
+After reconnaissance or focused validation, build and refresh the layered attack-surface review. Use that review to drive delegation instead of intuition:
+
+- Spawn Phase 1 agents for high-priority hosts and unresolved recon gaps
+- Spawn Phase 2 agents for high-priority endpoints, params, and objects
+- Spawn Phase 3 agents for chain opportunities and exposure pivots
+- Spawn blind-spot closure agents whenever the review still says "needs more data"
+- Prefer `strategy=coverage_first` after broad recon passes and `strategy=depth_first` after focused validation passes so agent slots are reserved for the right phase mix
+- When a validator agent confirms a real bug or materially strengthens it, spawn a separate impact/chaining agent instead of overloading the validator with escalation and coverage updates at the same time
+- After child agents finish or the ledger changes materially, run `run_attack_surface_orchestration_round` so the root subtree refreshes the review and launches the next wave instead of stopping at the first swarm
+
+Do not let the root agent keep deep testing work that should have become child tasks.
+
 ## Agent Architecture
 
 Structure agents by function:

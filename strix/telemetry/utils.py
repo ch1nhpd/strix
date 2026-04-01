@@ -15,9 +15,17 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from scrubadub import Scrubber
-from scrubadub.detectors import RegexDetector
-from scrubadub.filth import Filth
+
+try:
+    from scrubadub import Scrubber
+    from scrubadub.detectors import RegexDetector
+    from scrubadub.filth import Filth
+    _SCRUBADUB_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # noqa: BLE001
+    Scrubber = None  # type: ignore[assignment]
+    RegexDetector = object  # type: ignore[assignment,misc]
+    Filth = object  # type: ignore[assignment,misc]
+    _SCRUBADUB_IMPORT_ERROR = exc
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +74,14 @@ class _SecretTokenDetector(RegexDetector):  # type: ignore[misc]
 
 class TelemetrySanitizer:
     def __init__(self) -> None:
-        self._scrubber = Scrubber(detector_list=[_SecretTokenDetector])
+        self._scrubber = None
+        if Scrubber is not None:
+            self._scrubber = Scrubber(detector_list=[_SecretTokenDetector])
+        elif _SCRUBADUB_IMPORT_ERROR is not None:
+            logger.debug(
+                "scrubadub unavailable for telemetry sanitization; using regex fallback: %s",
+                _SCRUBADUB_IMPORT_ERROR,
+            )
 
     def sanitize(self, data: Any, key_hint: str | None = None) -> Any:  # noqa: PLR0911
         if data is None:
@@ -94,8 +109,10 @@ class TelemetrySanitizer:
             if key_hint and _SENSITIVE_KEY_PATTERN.search(key_hint):
                 return _REDACTED
 
-            cleaned = self._scrubber.clean(data)
-            return _SCRUBADUB_PLACEHOLDER_PATTERN.sub(_REDACTED, cleaned)
+            if self._scrubber is not None:
+                cleaned = self._scrubber.clean(data)
+                return _SCRUBADUB_PLACEHOLDER_PATTERN.sub(_REDACTED, cleaned)
+            return _SENSITIVE_TOKEN_PATTERN.sub(_REDACTED, data)
 
         if isinstance(data, int | float | bool):
             return data
@@ -344,18 +361,25 @@ def bootstrap_otel(
         otel_init_ok = False
         if traceloop:
             try:
-                from traceloop.sdk.instruments import Instruments
+                blocked_instruments: set[Any] = set()
+                try:
+                    from traceloop.sdk.instruments import Instruments
+                except Exception:  # noqa: BLE001
+                    Instruments = None  # type: ignore[assignment]
+                if Instruments is not None:
+                    blocked_instruments = {
+                        Instruments.URLLIB3,
+                        Instruments.REQUESTS,
+                    }
 
                 init_kwargs: dict[str, Any] = {
                     "app_name": "strix-agent",
                     "processor": local_processor,
                     "telemetry_enabled": False,
                     "resource_attributes": default_resource_attributes(),
-                    "block_instruments": {
-                        Instruments.URLLIB3,
-                        Instruments.REQUESTS,
-                    },
                 }
+                if blocked_instruments:
+                    init_kwargs["block_instruments"] = blocked_instruments
                 if remote_enabled:
                     init_kwargs.update(
                         {

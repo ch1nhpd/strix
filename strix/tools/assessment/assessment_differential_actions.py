@@ -10,6 +10,7 @@ from .assessment_validation_actions import (
     _normalize_request_spec,
     _normalize_success_statuses,
     _responses_match,
+    _spawn_followup_agents,
     _summarize_assessment,
 )
 
@@ -353,6 +354,20 @@ def _best_vulnerability_type(observations: list[dict[str, Any]]) -> str:
     return "authorization"
 
 
+def _differential_followup_decision(
+    observations: list[dict[str, Any]],
+) -> tuple[str, bool]:
+    if not observations:
+        return ("none", False)
+    top = observations[0]
+    confidence = str(top.get("confidence") or "").strip().lower()
+    impact_level = str(top.get("impact_level") or "").strip().lower()
+    parity_score = int(top.get("parity_score") or 0)
+    if confidence == "high" and parity_score >= 8 and impact_level in {"high", "critical"}:
+        return ("impact", True)
+    return ("signal", False)
+
+
 @register_tool(sandbox_execution=False)
 def analyze_differential_access(
     agent_state: Any,
@@ -367,6 +382,8 @@ def analyze_differential_access(
     follow_redirects: bool = False,
     similarity_threshold: float = 0.98,
     success_statuses: list[int] | None = None,
+    auto_spawn_signal_agents: bool = True,
+    auto_spawn_impact_agents: bool = True,
 ) -> dict[str, Any]:
     try:
         normalized_cases = [_normalize_access_case(agent_state, item) for item in cases]
@@ -536,6 +553,9 @@ def analyze_differential_access(
 
         hypothesis_result = None
         evidence_result = None
+        followup_mode, validated_signal = _differential_followup_decision(
+            suspicious_observations
+        )
         if suspicious_observations:
             vulnerability_type = _best_vulnerability_type(suspicious_observations)
             hypothesis_result = record_hypothesis(
@@ -547,7 +567,7 @@ def analyze_differential_access(
                 target=target,
                 component=component,
                 vulnerability_type=vulnerability_type,
-                status="open",
+                status="validated" if validated_signal else "open",
                 priority=coverage_priority,
                 rationale=coverage_rationale,
             )
@@ -587,6 +607,29 @@ def analyze_differential_access(
                 component=component,
                 related_coverage_id=coverage_result.get("coverage_id"),
             )
+        followup_agent_result = None
+        if followup_mode == "impact":
+            if auto_spawn_impact_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_impact=True,
+                )
+            elif auto_spawn_signal_agents:
+                followup_agent_result = _spawn_followup_agents(
+                    agent_state,
+                    target=target,
+                    hypothesis_result=hypothesis_result,
+                    prefer_signal=True,
+                )
+        elif followup_mode == "signal" and auto_spawn_signal_agents:
+            followup_agent_result = _spawn_followup_agents(
+                agent_state,
+                target=target,
+                hypothesis_result=hypothesis_result,
+                prefer_signal=True,
+            )
 
     except (TypeError, ValueError) as e:
         return {"success": False, "error": f"Failed to analyze differential access: {e}"}
@@ -601,6 +644,7 @@ def analyze_differential_access(
             "coverage_result": coverage_result,
             "hypothesis_result": hypothesis_result,
             "evidence_result": evidence_result,
+            "followup_agent_result": followup_agent_result,
             "assessment_summary": _summarize_assessment(
                 coverage_result,
                 hypothesis_result,

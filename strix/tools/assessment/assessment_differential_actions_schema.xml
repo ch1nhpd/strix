@@ -34,5 +34,11 @@
     <parameter name="success_statuses" required="false">
       <description>Optional list of HTTP status codes to treat as successful access.</description>
     </parameter>
+    <parameter name="auto_spawn_signal_agents" required="false">
+      <description>When true, suspicious differential-access results can automatically spawn a narrow validator agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
+    <parameter name="auto_spawn_impact_agents" required="false">
+      <description>When true, impact-ready differential-access signals can automatically spawn a dedicated impact/chaining agent when the current execution context supports agent creation. Default: true.</description>
+    </parameter>
   </parameters>
 </tool>
