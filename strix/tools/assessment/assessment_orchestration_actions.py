@@ -729,7 +729,7 @@ def _host_recon_skills(
     normalized_signal = str(signal_classification).strip().lower()
     normalized_resolve_status = str(resolve_status).strip().lower()
     if normalized_signal == "weak-signal" and normalized_resolve_status != "resolved":
-        return ["subfinder", "httpx", "naabu", "ffuf", "nuclei"]
+        return ["subfinder", "httpx", "naabu", "nmap", "nuclei"]
     skills = ["httpx", "katana", "ffuf", "nmap", "nuclei"]
     if host_type == "auth":
         skills = ["httpx", "katana", "ffuf", "authentication_jwt", "nuclei"]
@@ -757,8 +757,10 @@ def _host_recon_objective(host_row: dict[str, Any]) -> str:
         objective_lines.extend(
             [
                 "- If the host does not resolve or does not expose a live listener, do not stop after a single failed request.",
-                "- Exhaust passive/off-host recon before concluding blocked: inspect prior tool runs, runtime inventory, proxy history, JS/docs/OpenAPI/source-map references, callback/base-URL mentions, and DNS/CNAME/TLS/provider hints from sibling assets.",
-                "- Only attempt port scanning or directory fuzzing when you have a resolvable host, IP, or live service to test; otherwise record that those active checks were blocked and what passive coverage was still completed.",
+                "- Exhaust passive/off-host recon before concluding blocked: inspect prior successful requests, stored tool runs, runtime inventory, proxy history, JS/docs/OpenAPI/source-map references, callback/base-URL mentions, and DNS/CNAME/TLS/provider hints from sibling assets.",
+                "- Search history specifically for old live URLs, historical IPs, alternate ports, prior redirect targets, and leaked host references that could still open a usable pivot.",
+                "- If history reveals a prior IP, alternate port, or live sibling service, validate that pivot carefully before closing the host as blocked.",
+                "- Only attempt port scanning or directory fuzzing when you have a resolvable host, historical IP, or live service to test; otherwise record that those active checks were blocked and what passive coverage was still completed.",
             ]
         )
     else:

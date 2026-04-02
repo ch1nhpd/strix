@@ -474,9 +474,11 @@ def test_spawn_attack_surface_agents_host_recon_task_requires_passive_fallback_f
     assert "Resolve status: needs more data" in create_calls[0]["task"]
     assert "do not stop after a single failed request" in create_calls[0]["task"]
     assert "Exhaust passive/off-host recon before concluding blocked" in create_calls[0]["task"]
-    assert "Only attempt port scanning or directory fuzzing when you have a resolvable host" in create_calls[0]["task"]
+    assert "Search history specifically for old live URLs, historical IPs, alternate ports" in create_calls[0]["task"]
+    assert "If history reveals a prior IP, alternate port, or live sibling service" in create_calls[0]["task"]
+    assert "Only attempt port scanning or directory fuzzing when you have a resolvable host, historical IP, or live service" in create_calls[0]["task"]
     assert "subfinder" in str(create_calls[0]["skills"])
-    assert "ffuf" in str(create_calls[0]["skills"])
+    assert "nmap" in str(create_calls[0]["skills"])
 
 
 def test_spawn_attack_surface_agents_coverage_first_reserves_phase_mix(monkeypatch: Any) -> None:
