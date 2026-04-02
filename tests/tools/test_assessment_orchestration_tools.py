@@ -411,6 +411,74 @@ def test_spawn_attack_surface_agents_skips_active_duplicates(monkeypatch: Any) -
     assert "auto-refreshes follow-up when this child finishes" in created_calls[0]["task"]
 
 
+def test_spawn_attack_surface_agents_host_recon_task_requires_passive_fallback_for_weak_unresolved_host(
+    monkeypatch: Any,
+) -> None:
+    state = DummyState("agent_root")
+    surface_review_actions._surface_review_storage[state.agent_id] = {
+        "web": {
+            "target": "web",
+            "updated_at": "2026-04-01T00:00:00+00:00",
+            "report": {
+                "summary": {
+                    "host_count": 1,
+                    "path_count": 0,
+                    "blind_spot_count": 1,
+                    "needs_more_data": True,
+                },
+                "priorities": {
+                    "top_targets_next": [
+                        {
+                            "host": "dashboard.app.test",
+                            "preliminary_type": "admin",
+                            "coverage_status": "mapped",
+                            "signal_classification": "weak-signal",
+                            "priority": "low",
+                            "resolve_status": "needs more data",
+                            "sources": ["scope_guess"],
+                            "notes": ["Guessed from naming pattern under app.test; needs more data."],
+                        }
+                    ],
+                    "top_endpoints_next": [],
+                    "top_params_objects": [],
+                    "top_recon_value_exposures": [],
+                    "top_chain_opportunities": [],
+                    "top_blind_spots": [],
+                },
+            },
+        }
+    }
+
+    create_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        orchestration_actions,
+        "create_agent",
+        lambda agent_state, task, name, inherit_context=True, skills=None: create_calls.append(
+            {"task": task, "name": name, "skills": skills}
+        )
+        or {"success": True, "agent_id": "agent_weak", "active_skills": skills.split(",") if skills else []},
+    )
+
+    result = orchestration_actions.spawn_attack_surface_agents(
+        agent_state=state,
+        target="web",
+        max_agents=1,
+        dry_run=False,
+    )
+
+    assert result["success"] is True
+    assert result["created_count"] == 1
+    assert create_calls[0]["name"] == "P1 Recon dashboard.app.test"
+    assert "Signal classification: weak-signal" in create_calls[0]["task"]
+    assert "Resolve status: needs more data" in create_calls[0]["task"]
+    assert "do not stop after a single failed request" in create_calls[0]["task"]
+    assert "Exhaust passive/off-host recon before concluding blocked" in create_calls[0]["task"]
+    assert "Only attempt port scanning or directory fuzzing when you have a resolvable host" in create_calls[0]["task"]
+    assert "subfinder" in str(create_calls[0]["skills"])
+    assert "ffuf" in str(create_calls[0]["skills"])
+
+
 def test_spawn_attack_surface_agents_coverage_first_reserves_phase_mix(monkeypatch: Any) -> None:
     state = DummyState("agent_root")
     _seed_phase_heavy_review(state)

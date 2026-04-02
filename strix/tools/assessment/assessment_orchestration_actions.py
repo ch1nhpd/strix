@@ -720,13 +720,55 @@ def _bug_skills(bug_classes: list[str], module_name: str = "") -> list[str]:
     return skills[:5]
 
 
-def _host_recon_skills(host_type: str) -> list[str]:
+def _host_recon_skills(
+    host_type: str,
+    *,
+    signal_classification: str = "",
+    resolve_status: str = "",
+) -> list[str]:
+    normalized_signal = str(signal_classification).strip().lower()
+    normalized_resolve_status = str(resolve_status).strip().lower()
+    if normalized_signal == "weak-signal" and normalized_resolve_status != "resolved":
+        return ["subfinder", "httpx", "naabu", "ffuf", "nuclei"]
     skills = ["httpx", "katana", "ffuf", "nmap", "nuclei"]
     if host_type == "auth":
         skills = ["httpx", "katana", "ffuf", "authentication_jwt", "nuclei"]
     elif host_type == "api":
         skills = ["httpx", "katana", "graphql", "nuclei", "ffuf"]
     return skills[:5]
+
+
+def _host_recon_objective(host_row: dict[str, Any]) -> str:
+    signal_classification = str(host_row.get("signal_classification") or "").strip().lower()
+    resolve_status = str(host_row.get("resolve_status") or "").strip().lower()
+    objective_lines = [
+        "- Expand host -> service -> web/app -> path -> file -> endpoint coverage for this host.",
+        "- Execute the full applicable ladder: DNS/TLS/provider clues -> port/service scan -> HTTP fingerprint -> crawl/path fuzz -> JS/docs/data-leak mining.",
+        "- Reconcile current wrapped-tool output with missing attack surface and hidden routes.",
+        "- Push coverage ledger updates instead of broad narration.",
+        "- If you find a real vulnerability signal, create a dedicated child validation agent for that specific bug and location.",
+        "- Prioritize reducing blind spots over repeating already-covered scans.",
+    ]
+    if signal_classification == "weak-signal":
+        objective_lines.append(
+            "- First validate whether this host is real by corroborating it through subdomain discovery, cert/SAN or provider clues, proxy/runtime history, and sibling asset references."
+        )
+    if resolve_status and resolve_status != "resolved":
+        objective_lines.extend(
+            [
+                "- If the host does not resolve or does not expose a live listener, do not stop after a single failed request.",
+                "- Exhaust passive/off-host recon before concluding blocked: inspect prior tool runs, runtime inventory, proxy history, JS/docs/OpenAPI/source-map references, callback/base-URL mentions, and DNS/CNAME/TLS/provider hints from sibling assets.",
+                "- Only attempt port scanning or directory fuzzing when you have a resolvable host, IP, or live service to test; otherwise record that those active checks were blocked and what passive coverage was still completed.",
+            ]
+        )
+    else:
+        objective_lines.extend(
+            [
+                "- If the host is reachable, verify services/ports, then run path discovery, crawl/JS route mining, and exposed-file/data-leak checks before closing the recon task.",
+                "- Do not end after the first live page; keep digging until path/file/endpoint coverage materially improves or is explicitly blocked.",
+            ]
+        )
+    return "\n".join(objective_lines)
 
 
 def _blind_spot_skills(area: str) -> list[str]:
@@ -1941,6 +1983,10 @@ def spawn_attack_surface_agents(
                     continue
                 host_type = str(host_row.get("preliminary_type") or "unknown")
                 priority = str(host_row.get("priority") or "normal")
+                signal_classification = str(host_row.get("signal_classification") or "").strip()
+                resolve_status = str(host_row.get("resolve_status") or "").strip() or "needs more data"
+                discovery_sources = list(host_row.get("sources") or [])
+                host_notes = list(host_row.get("notes") or [])
                 enqueue(
                     _candidate(
                         dedupe_key=f"recon-host|{host}",
@@ -1948,19 +1994,23 @@ def spawn_attack_surface_agents(
                         name=f"P1 Recon {host}",
                         priority=priority,
                         kind="host-recon",
-                        skills=_host_recon_skills(host_type),
+                        skills=_host_recon_skills(
+                            host_type,
+                            signal_classification=signal_classification,
+                            resolve_status=resolve_status,
+                        ),
                         task=(
                             f"Delegation key: recon-host|{host}\n"
                             f"Phase: Phase 1 layered reconnaissance and surface expansion\n"
                             f"Target host: {host}\n"
                             f"Host type hint: {host_type}\n"
+                            f"Signal classification: {signal_classification or 'needs more data'}\n"
+                            f"Resolve status: {resolve_status}\n"
+                            f"Discovery sources: {discovery_sources or ['needs more data']}\n"
+                            f"Host notes: {host_notes or ['none recorded']}\n"
                             f"Coverage status: {coverage_status or 'needs more data'}\n"
                             "Objective:\n"
-                            "- Expand host -> service -> web/app -> path -> file -> endpoint coverage for this host.\n"
-                            "- Reconcile current wrapped-tool output with missing attack surface and hidden routes.\n"
-                            "- Push coverage ledger updates instead of broad narration.\n"
-                            "- If you find a real vulnerability signal, create a dedicated child validation agent for that specific bug and location.\n"
-                            "- Prioritize reducing blind spots over repeating already-covered scans."
+                            f"{_host_recon_objective(host_row)}"
                         ),
                     )
                 )
