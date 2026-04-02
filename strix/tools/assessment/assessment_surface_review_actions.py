@@ -201,6 +201,53 @@ def _max_priority(values: list[str]) -> str:
     return max(values, key=_priority_rank)
 
 
+def _host_is_scope_guess_only(host_record: dict[str, Any]) -> bool:
+    sources = {
+        str(item).strip()
+        for item in list(host_record.get("sources") or [])
+        if str(item).strip()
+    }
+    return bool(sources) and sources == {"scope_guess"}
+
+
+def _host_has_non_guess_signal(host_record: dict[str, Any]) -> bool:
+    sources = {
+        str(item).strip()
+        for item in list(host_record.get("sources") or [])
+        if str(item).strip()
+    }
+    return any(source not in {"scope", "scope_guess"} for source in sources)
+
+
+def _host_signal_rank(signal_classification: str) -> int:
+    return {
+        "confirmed": 0,
+        "suspected": 1,
+        "exposed-info": 2,
+        "weak-signal": 3,
+        "blind-spot": 4,
+        "duplicate-risk": 5,
+        "out-of-scope": 6,
+    }.get(str(signal_classification).strip().lower(), 7)
+
+
+def _host_target_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int, str]:
+    sources = {
+        str(value).strip()
+        for value in list(item.get("sources") or [])
+        if str(value).strip()
+    }
+    scope_guess_only = bool(sources) and sources == {"scope_guess"}
+    resolve_rank = 0 if str(item.get("resolve_status") or "").strip().lower() == "resolved" else 1
+    return (
+        _host_signal_rank(str(item.get("signal_classification") or "")),
+        resolve_rank,
+        1 if scope_guess_only else 0,
+        -_priority_rank(str(item.get("priority") or "normal")),
+        str(item.get("host") or ""),
+    )
+
+
 def _priority_for_service(
     *,
     port: int,
@@ -1949,12 +1996,14 @@ def build_attack_surface_review(
                 str(host_record["host"]),
                 [str(path) for path in list(host_record["paths"])],
             )
-            priorities = ["normal"]
-            if any(
+            scope_guess_only = _host_is_scope_guess_only(host_record)
+            unresolved_scope_guess = scope_guess_only and not bool(host_record["resolved"])
+            priorities = ["low" if unresolved_scope_guess else "normal"]
+            if not unresolved_scope_guess and any(
                 keyword in str(host_record["host"]) for keyword in ["admin", "auth", "api", "files"]
             ):
                 priorities.append("high")
-            if host_record["preliminary_type"] in {"admin", "auth"}:
+            if not unresolved_scope_guess and host_record["preliminary_type"] in {"admin", "auth"}:
                 priorities.append("critical")
             if host_record["signal_classification"] == "weak-signal":
                 priorities.append("low")
@@ -1966,6 +2015,12 @@ def build_attack_surface_review(
             )
             if not host_record["in_scope"]:
                 host_record["signal_classification"] = "out-of-scope"
+            elif (
+                host_record["resolved"]
+                and host_record["signal_classification"] == "weak-signal"
+                and _host_has_non_guess_signal(host_record)
+            ):
+                host_record["signal_classification"] = "suspected"
             elif host_record["resolved"] and host_record["signal_classification"] != "weak-signal":
                 host_record["signal_classification"] = "confirmed"
             if host_record["raw_observation_count"] >= 3:
@@ -2538,7 +2593,7 @@ def build_attack_surface_review(
             "priorities": {
                 "top_targets_next": sorted(
                     host_rows,
-                    key=lambda item: (-_priority_rank(str(item["priority"])), item["host"]),
+                    key=_host_target_sort_key,
                 )[:max_priorities],
                 "top_services_next": sorted(
                     [
