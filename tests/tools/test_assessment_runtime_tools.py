@@ -14,7 +14,7 @@ sys.modules.setdefault("strix.telemetry.posthog", fake_posthog)
 
 from strix.tools.agents_graph import agents_graph_actions
 from strix.tools.assessment import clear_assessment_storage, list_assessment_state
-from strix.tools.assessment.assessment_actions import record_coverage
+from strix.tools.assessment.assessment_actions import _slug, record_coverage
 from strix.tools.assessment import assessment_runtime_actions as runtime_actions
 
 
@@ -186,3 +186,53 @@ def test_map_runtime_surface_preserves_existing_status_and_marks_truncated_inven
     assert second["inventory_truncated"] is False
     assert surface_index["Runtime endpoint GET /api/orders/:id"]["status"] == "covered"
     assert surface_index["Runtime inventory completeness for web"]["status"] == "covered"
+
+
+def test_list_runtime_inventory_returns_empty_success_when_target_is_missing() -> None:
+    state = DummyState("agent_root")
+
+    result = runtime_actions.list_runtime_inventory(agent_state=state, target="*.winticket.jp")
+
+    assert result["success"] is True
+    assert result["inventory_count"] == 0
+    assert result["target"] == "*.winticket.jp"
+    assert result["needs_more_data"] is True
+    assert result["records"] == []
+
+
+def test_list_runtime_inventory_matches_related_host_records_for_wildcard_target() -> None:
+    state = DummyState("agent_root")
+    target_key = _slug("admin.winticket.jp")
+    runtime_actions._runtime_inventory_storage[state.agent_id] = {
+        target_key: {
+            "target": "admin.winticket.jp",
+            "inventory": [
+                {
+                    "host": "admin.winticket.jp",
+                    "normalized_path": "/login",
+                    "methods": ["GET"],
+                    "status_codes": [200],
+                    "query_params": [],
+                    "body_params": [],
+                    "content_types": ["text/html"],
+                    "auth_hints": ["anonymous"],
+                    "sources": ["proxy"],
+                    "origins": ["requests"],
+                    "sample_urls": ["https://admin.winticket.jp/login"],
+                    "sample_request_ids": ["req_admin"],
+                    "observed_count": 1,
+                    "priority": "high",
+                }
+            ],
+            "selected_inventory": [],
+            "inventory_total": 1,
+            "mapped_at": "2026-04-02T00:00:00+00:00",
+        }
+    }
+
+    result = runtime_actions.list_runtime_inventory(agent_state=state, target="*.winticket.jp")
+
+    assert result["success"] is True
+    assert result["inventory_count"] == 1
+    assert result["needs_more_data"] is False
+    assert result["records"][0]["target"] == "admin.winticket.jp"

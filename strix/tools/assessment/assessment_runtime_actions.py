@@ -202,6 +202,34 @@ def _sort_inventory(item: dict[str, Any]) -> tuple[int, int, str, str]:
     )
 
 
+def _runtime_target_lookup_variants(target: str) -> list[str]:
+    candidate = str(target).strip().lower()
+    if not candidate:
+        return []
+    variants = [candidate]
+    if candidate.startswith("*."):
+        variants.append(candidate[2:])
+    return list(dict.fromkeys(item for item in variants if item))
+
+
+def _record_matches_runtime_target(record: dict[str, Any], target: str) -> bool:
+    variants = _runtime_target_lookup_variants(target)
+    if not variants:
+        return False
+    record_target = str(record.get("target") or "").strip().lower()
+    if record_target in variants:
+        return True
+    inventory = [item for item in list(record.get("inventory") or []) if isinstance(item, dict)]
+    for item in inventory:
+        host = str(item.get("host") or "").strip().lower()
+        if not host:
+            continue
+        for variant in variants:
+            if host == variant or host.endswith(f".{variant}"):
+                return True
+    return False
+
+
 def _collect_requests(
     manager: Any,
     *,
@@ -634,9 +662,10 @@ def list_runtime_inventory(
 
         if target:
             lookup = inventory_store.get(_slug(target))
-            if lookup is None:
-                raise ValueError(f"No runtime inventory found for target '{target}'")
-            records = [lookup]
+            if lookup is not None:
+                records = [lookup]
+            else:
+                records = [record for record in records if _record_matches_runtime_target(record, target)]
 
         response_records = []
         for record in records[:max_items]:
@@ -653,5 +682,7 @@ def list_runtime_inventory(
             "success": True,
             "root_agent_id": root_agent_id,
             "inventory_count": len(records),
+            "target": target,
+            "needs_more_data": bool(target) and not bool(records),
             "records": response_records,
         }

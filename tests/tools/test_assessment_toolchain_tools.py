@@ -635,6 +635,31 @@ def test_run_security_tool_scan_subfinder_seeds_discovered_hosts(monkeypatch: An
     assert "Discovered host admin.example.com" in surfaces
 
 
+def test_run_security_tool_scan_returns_skipped_result_when_tool_is_unavailable(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(toolchain_actions, "_resolve_tool_executable", lambda tool_name: None)
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_scan(
+        agent_state=state,
+        tool_name="subfinder",
+        target="external",
+        targets=["winticket.jp"],
+    )
+    runs = toolchain_actions.list_security_tool_runs(agent_state=state, tool_name="subfinder")
+
+    assert result["success"] is True
+    assert result["skipped"] is True
+    assert result["availability"] == "missing_tool"
+    assert result["needs_more_data"] is True
+    assert "not available on PATH" in str(result["skip_reason"])
+    assert runs["success"] is True
+    assert runs["run_count"] == 1
+    assert runs["runs"][0]["skipped"] is True
+    assert runs["runs"][0]["exit_code"] == 127
+
+
 def test_run_security_tool_scan_naabu_seeds_open_ports(monkeypatch: Any) -> None:
     _patch_scan(
         monkeypatch,

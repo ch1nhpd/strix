@@ -902,7 +902,12 @@ def _reusable_tool_run(
     return matches[0] if matches else None
 
 
-def _tool_run_response(record: TOOL_RUN, *, include_findings: bool) -> dict[str, Any]:
+def _tool_run_response(
+    record: TOOL_RUN,
+    *,
+    include_findings: bool,
+    reused_existing_run: bool = True,
+) -> dict[str, Any]:
     response: dict[str, Any] = {
         "success": True,
         "root_agent_id": record.get("root_agent_id"),
@@ -919,7 +924,11 @@ def _tool_run_response(record: TOOL_RUN, *, include_findings: bool) -> dict[str,
         "stderr_preview": record.get("stderr_preview"),
         "scope_key": record.get("scope_key"),
         "scope": record.get("scope"),
-        "reused_existing_run": True,
+        "reused_existing_run": reused_existing_run,
+        "skipped": bool(record.get("skipped")),
+        "skip_reason": record.get("skip_reason"),
+        "availability": record.get("availability"),
+        "needs_more_data": bool(record.get("needs_more_data")),
     }
     if include_findings:
         response["findings"] = list(record.get("findings") or [])
@@ -1433,6 +1442,99 @@ def _record_run_evidence(
         target=logical_target,
         component=component,
     )
+
+
+def _missing_tool_skip_reason(tool_name: str, error: BaseException) -> str | None:
+    normalized_tool = str(tool_name).strip().lower()
+    message = str(error).strip()
+    lowered = message.lower()
+    if f"{normalized_tool} is not available on path" in lowered:
+        return message or f"{tool_name} is not available on PATH"
+    if isinstance(error, FileNotFoundError):
+        return message or f"{tool_name} is not available on PATH"
+    if isinstance(error, OSError):
+        if getattr(error, "errno", None) == 2 or getattr(error, "winerror", None) == 2:
+            return message or f"{tool_name} is not available on PATH"
+    if "no such file or directory" in lowered:
+        return message or f"{tool_name} is not available on PATH"
+    if "the system cannot find the file specified" in lowered:
+        return message or f"{tool_name} is not available on PATH"
+    return None
+
+
+def _record_skipped_tool_run(
+    agent_state: Any,
+    *,
+    store: dict[str, TOOL_RUN],
+    root_agent_id: str,
+    tool_name: str,
+    logical_target: str,
+    logical_component: str,
+    scope_key: str,
+    scope_payload: dict[str, Any],
+    resolved_output_path: str,
+    include_findings: bool,
+    reason: str,
+    command: list[str] | None = None,
+) -> dict[str, Any]:
+    started_at = _utc_now()
+    attempted_command = list(command or [tool_name])
+    run_id = _stable_id(
+        "scan",
+        logical_target,
+        logical_component,
+        tool_name,
+        started_at,
+    )
+    execution = {
+        "exit_code": 127,
+        "stdout": "",
+        "stderr": reason,
+    }
+    evidence_result = _record_run_evidence(
+        agent_state,
+        tool_name=tool_name,
+        logical_target=logical_target,
+        component=logical_component,
+        run_id=run_id,
+        command=attempted_command,
+        execution=execution,
+        findings=[],
+    )
+    run_record: TOOL_RUN = {
+        "root_agent_id": root_agent_id,
+        "run_id": run_id,
+        "tool_name": tool_name,
+        "target": logical_target,
+        "component": logical_component,
+        "command": attempted_command,
+        "exit_code": execution["exit_code"],
+        "stdout_preview": "",
+        "stderr_preview": _truncate(reason, 400),
+        "finding_count": 0,
+        "findings": [],
+        "output_path": resolved_output_path,
+        "created_at": started_at,
+        "updated_at": _utc_now(),
+        "scope_key": scope_key,
+        "scope": scope_payload,
+        "discovery_seed_count": 0,
+        "hypothesis_seed_count": 0,
+        "evidence_id": evidence_result.get("evidence_id"),
+        "skipped": True,
+        "skip_reason": reason,
+        "availability": "missing_tool",
+        "needs_more_data": True,
+    }
+    store[run_id] = run_record
+
+    response = _tool_run_response(
+        run_record,
+        include_findings=include_findings,
+        reused_existing_run=False,
+    )
+    response["evidence_result"] = evidence_result
+    return response
 
 
 def _unique_strings(items: list[str]) -> list[str]:
@@ -7263,60 +7365,81 @@ def run_security_tool_scan(
         )
         scope_key = _scope_key(scope_payload)
         resolved_output_path = _ensure_output_path(normalized_tool_name, output_path)
-        command = _build_command(
-            normalized_tool_name,
-            targets=normalized_targets,
-            target_path=target_path,
-            url=url,
-            wordlist_path=wordlist_path,
-            raw_request_path=raw_request_path,
-            paths=normalized_paths,
-            headers=normalized_headers,
-            data=data,
-            request_method=normalized_request_method,
-            ports=ports,
-            top_ports=top_ports,
-            parameter=parameter,
-            configs=normalized_configs,
-            tags=normalized_tags,
-            severities=normalized_severities,
-            proxy_url=proxy_url,
-            automatic_scan=automatic_scan,
-            active_only=active_only,
-            collect_sources=collect_sources,
-            no_interactsh=no_interactsh,
-            use_js_crawl=use_js_crawl,
-            headless=headless,
-            known_files=known_files,
-            recursion=recursion,
-            recursion_depth=recursion_depth,
-            scan_type=scan_type,
-            host_discovery_disabled=host_discovery_disabled,
-            service_detection=service_detection,
-            default_scripts=default_scripts,
-            store_response=store_response,
-            flush_session=flush_session,
-            threads=threads,
-            rate_limit=rate_limit,
-            concurrency=concurrency,
-            bulk_size=bulk_size,
-            depth=depth,
-            timeout=timeout,
-            retries=retries,
-            max_time_minutes=max_time_minutes,
-            host_timeout=host_timeout,
-            script_timeout=script_timeout,
-            level=level,
-            risk=risk,
-            zapit=zapit,
-            jwt_token=normalized_jwt_token,
-            canary_value=normalized_canary_value,
-            public_key_path=normalized_public_key_path,
-            dictionary_path=normalized_dictionary_path,
-            output_path=resolved_output_path,
-        )
         started_at = _utc_now()
-        execution = _execute_tool_command(command, timeout=timeout)
+        try:
+            command = _build_command(
+                normalized_tool_name,
+                targets=normalized_targets,
+                target_path=target_path,
+                url=url,
+                wordlist_path=wordlist_path,
+                raw_request_path=raw_request_path,
+                paths=normalized_paths,
+                headers=normalized_headers,
+                data=data,
+                request_method=normalized_request_method,
+                ports=ports,
+                top_ports=top_ports,
+                parameter=parameter,
+                configs=normalized_configs,
+                tags=normalized_tags,
+                severities=normalized_severities,
+                proxy_url=proxy_url,
+                automatic_scan=automatic_scan,
+                active_only=active_only,
+                collect_sources=collect_sources,
+                no_interactsh=no_interactsh,
+                use_js_crawl=use_js_crawl,
+                headless=headless,
+                known_files=known_files,
+                recursion=recursion,
+                recursion_depth=recursion_depth,
+                scan_type=scan_type,
+                host_discovery_disabled=host_discovery_disabled,
+                service_detection=service_detection,
+                default_scripts=default_scripts,
+                store_response=store_response,
+                flush_session=flush_session,
+                threads=threads,
+                rate_limit=rate_limit,
+                concurrency=concurrency,
+                bulk_size=bulk_size,
+                depth=depth,
+                timeout=timeout,
+                retries=retries,
+                max_time_minutes=max_time_minutes,
+                host_timeout=host_timeout,
+                script_timeout=script_timeout,
+                level=level,
+                risk=risk,
+                zapit=zapit,
+                jwt_token=normalized_jwt_token,
+                canary_value=normalized_canary_value,
+                public_key_path=normalized_public_key_path,
+                dictionary_path=normalized_dictionary_path,
+                output_path=resolved_output_path,
+            )
+            execution = _execute_tool_command(command, timeout=timeout)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as scan_error:
+            missing_tool_reason = _missing_tool_skip_reason(normalized_tool_name, scan_error)
+            if missing_tool_reason is not None:
+                return _record_skipped_tool_run(
+                    agent_state,
+                    store=store,
+                    root_agent_id=root_agent_id,
+                    tool_name=normalized_tool_name,
+                    logical_target=logical_target,
+                    logical_component=logical_component,
+                    scope_key=scope_key,
+                    scope_payload=scope_payload,
+                    resolved_output_path=resolved_output_path,
+                    include_findings=include_findings,
+                    reason=(
+                        f"{missing_tool_reason}; skipping wrapped scan and marking "
+                        "needs_more_data so other recon pivots can continue."
+                    ),
+                )
+            raise
         output_content = _read_output_file(resolved_output_path)
         if normalized_tool_name == "httpx" and _should_retry_httpx_with_basic_flags(
             execution, output_content
