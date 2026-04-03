@@ -22,15 +22,23 @@ from .assessment_actions import (
     _resolve_root_agent_id,
     list_assessment_state,
 )
+from .assessment_session_actions import list_session_profiles
 from .assessment_surface_review_actions import list_attack_surface_reviews
 
 SUPPORTED_SWARM_STRATEGIES = {"balanced", "coverage_first", "depth_first"}
 SUPPORTED_SIGNAL_STATUSES = {"open", "in_progress", "validated"}
 PHASE_RECON = "phase-1-recon"
+PHASE_POST_AUTH = "phase-1b-post-authenticated-coverage"
 PHASE_VALIDATION = "phase-2-validation"
 PHASE_CHAINING = "phase-3-chaining"
 PHASE_GAP_CLOSURE = "phase-gap-closure"
-PHASE_SEQUENCE = [PHASE_RECON, PHASE_VALIDATION, PHASE_CHAINING, PHASE_GAP_CLOSURE]
+PHASE_SEQUENCE = [
+    PHASE_RECON,
+    PHASE_POST_AUTH,
+    PHASE_VALIDATION,
+    PHASE_CHAINING,
+    PHASE_GAP_CLOSURE,
+]
 URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 STRONG_SIGNAL_HINTS = (
     "browser confirmed",
@@ -744,6 +752,8 @@ def _host_recon_objective(host_row: dict[str, Any]) -> str:
     objective_lines = [
         "- Expand host -> service -> web/app -> path -> file -> endpoint coverage for this host.",
         "- Execute the full applicable ladder: DNS/TLS/provider clues -> port/service scan -> HTTP fingerprint -> crawl/path fuzz -> JS/docs/data-leak mining.",
+        "- Start with security_tool_doctor for the relevant wrapped tools, then use run_security_tool_pipeline for the first blackbox bootstrap before improvising one-off scans.",
+        "- When calling run_security_tool_scan directly, always include both required parameters target and tool_name and pass concrete scan inputs instead of placeholder calls.",
         "- Reconcile current wrapped-tool output with missing attack surface and hidden routes.",
         "- Push coverage ledger updates instead of broad narration.",
         "- If you find a real vulnerability signal, create a dedicated child validation agent for that specific bug and location.",
@@ -767,6 +777,8 @@ def _host_recon_objective(host_row: dict[str, Any]) -> str:
         objective_lines.extend(
             [
                 "- If the host is reachable, verify services/ports, then run path discovery, crawl/JS route mining, and exposed-file/data-leak checks before closing the recon task.",
+                "- For service discovery, do not limit yourself to only 80/443/8080/8443 unless prior evidence or scope rules force that narrower profile.",
+                "- If ffuf is available, pair it with a real wordlist and fuzz concrete FUZZ URLs rather than skipping path brute-forcing entirely.",
                 "- Do not end after the first live page; keep digging until path/file/endpoint coverage materially improves or is explicitly blocked.",
             ]
         )
@@ -833,6 +845,139 @@ def _boundary_skills(boundary: str) -> list[str]:
         skills.append("authentication_jwt")
     if any(marker in lowered for marker in ["invited", "verified", "suspended", "deleted"]):
         skills.append("business_logic")
+    deduped: list[str] = []
+    for skill in skills:
+        if skill not in deduped:
+            deduped.append(skill)
+        if len(deduped) >= 5:
+            break
+    return deduped
+
+
+def _session_profile_overview(agent_state: Any, *, max_items: int = 12) -> dict[str, Any]:
+    try:
+        result = list_session_profiles(
+            agent_state=agent_state,
+            include_values=False,
+            max_items=max_items,
+        )
+    except Exception:  # noqa: BLE001
+        result = {"success": False}
+
+    profiles = [
+        item
+        for item in list(result.get("profiles") or [])
+        if isinstance(item, dict)
+    ]
+    names = _unique_strings(
+        [str(item.get("name") or "").strip() for item in profiles if str(item.get("name") or "").strip()]
+    )
+    roles = _unique_strings(
+        [str(item.get("role") or "").strip() for item in profiles if str(item.get("role") or "").strip()]
+    )
+    tenants = _unique_strings(
+        [str(item.get("tenant") or "").strip() for item in profiles if str(item.get("tenant") or "").strip()]
+    )
+    return {
+        "available": bool(result.get("success")),
+        "count": int(result.get("profile_count") or 0),
+        "profiles": profiles,
+        "names": names,
+        "roles": roles,
+        "tenants": tenants,
+    }
+
+
+def _post_auth_module_sections(module_row: dict[str, Any]) -> list[str]:
+    sections: list[str] = []
+    for value in list(module_row.get("major_sections") or []):
+        normalized = str(value).strip()
+        if normalized and normalized not in sections:
+            sections.append(normalized)
+    for value in list(module_row.get("auth_surfaces") or []):
+        normalized = str(value).strip()
+        if normalized and normalized not in sections:
+            sections.append(normalized)
+    for field in ("billing_surfaces", "upload_surfaces", "download_surfaces", "root_paths"):
+        for value in list(module_row.get(field) or []):
+            normalized = str(value).strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "admin",
+                    "account",
+                    "api",
+                    "billing",
+                    "checkout",
+                    "coupon",
+                    "dashboard",
+                    "download",
+                    "export",
+                    "file",
+                    "image",
+                    "import",
+                    "invite",
+                    "profile",
+                    "search",
+                    "settings",
+                    "upload",
+                )
+            ) and normalized not in sections:
+                sections.append(normalized)
+    return sections[:10]
+
+
+def _post_auth_focus_hints(module_row: dict[str, Any]) -> list[str]:
+    blob = " ".join(
+        [
+            str(module_row.get("application_module") or ""),
+            *[str(item) for item in list(module_row.get("major_sections") or [])],
+            *[str(item) for item in list(module_row.get("auth_surfaces") or [])],
+            *[str(item) for item in list(module_row.get("billing_surfaces") or [])],
+            *[str(item) for item in list(module_row.get("upload_surfaces") or [])],
+            *[str(item) for item in list(module_row.get("download_surfaces") or [])],
+            *[str(item) for item in list(module_row.get("bug_classes") or [])],
+        ]
+    ).lower()
+    focuses = ["authz", "workflow_race"]
+    if any(keyword in blob for keyword in ("query", "search", "filter", "report", "analytics")):
+        focuses.append("sqli")
+    if any(keyword in blob for keyword in ("comment", "message", "search", "preview", "profile", "bio")):
+        focuses.append("xss")
+    if any(keyword in blob for keyword in ("webhook", "callback", "url", "redirect")):
+        focuses.extend(["ssrf_oob", "open_redirect"])
+    if any(keyword in blob for keyword in ("file", "download", "export", "document", "attachment")):
+        focuses.append("path_traversal")
+    if any(keyword in blob for keyword in ("upload", "avatar", "image", "attachment", "import")):
+        focuses.append("file_upload")
+    if any(keyword in blob for keyword in ("xml", "svg", "feed", "saml", "import")):
+        focuses.append("xxe")
+    if any(keyword in blob for keyword in ("template", "render", "preview")):
+        focuses.append("ssti")
+    return _unique_strings(focuses)[:8]
+
+
+def _post_auth_skills(
+    module_row: dict[str, Any],
+    *,
+    session_profile_count: int,
+) -> list[str]:
+    skills = ["authentication_jwt", "idor", "business_logic", "race_conditions"]
+    if session_profile_count >= 2:
+        skills.insert(1, "broken_function_level_authorization")
+    skills.extend(
+        _bug_skills(
+            [str(item) for item in list(module_row.get("bug_classes") or [])],
+            str(module_row.get("application_module") or ""),
+        )
+    )
+    if list(module_row.get("upload_surfaces") or []):
+        skills.append("insecure_file_uploads")
+    if any("graphql" in str(item).lower() for item in list(module_row.get("docs_endpoints") or [])):
+        skills.append("graphql")
     deduped: list[str] = []
     for skill in skills:
         if skill not in deduped:
@@ -1730,22 +1875,22 @@ def _phase_strategy_orders(
 ) -> tuple[list[str], list[str]]:
     if strategy == "coverage_first":
         return (
-            [PHASE_RECON, PHASE_VALIDATION, PHASE_GAP_CLOSURE, PHASE_CHAINING],
-            [PHASE_RECON, PHASE_GAP_CLOSURE, PHASE_VALIDATION, PHASE_CHAINING],
+            [PHASE_RECON, PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_GAP_CLOSURE, PHASE_CHAINING],
+            [PHASE_RECON, PHASE_POST_AUTH, PHASE_GAP_CLOSURE, PHASE_VALIDATION, PHASE_CHAINING],
         )
     if strategy == "depth_first":
         return (
-            [PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
-            [PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
+            [PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
+            [PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
         )
     if needs_more_data:
         return (
-            [PHASE_RECON, PHASE_VALIDATION, PHASE_GAP_CLOSURE, PHASE_CHAINING],
-            [PHASE_RECON, PHASE_VALIDATION, PHASE_GAP_CLOSURE, PHASE_CHAINING],
+            [PHASE_RECON, PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_GAP_CLOSURE, PHASE_CHAINING],
+            [PHASE_RECON, PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_GAP_CLOSURE, PHASE_CHAINING],
         )
     return (
-        [PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
-        [PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
+        [PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
+        [PHASE_POST_AUTH, PHASE_VALIDATION, PHASE_CHAINING, PHASE_RECON, PHASE_GAP_CLOSURE],
     )
 
 
@@ -1950,6 +2095,11 @@ def spawn_attack_surface_agents(
             for item in list(priorities.get("top_bug_class_gaps_next") or bug_class_entries)
             if isinstance(item, dict)
         ]
+        session_profile_info = _session_profile_overview(agent_state)
+        session_profile_count = int(session_profile_info.get("count") or 0)
+        session_profile_names = list(session_profile_info.get("names") or [])
+        session_profile_roles = list(session_profile_info.get("roles") or [])
+        session_profile_tenants = list(session_profile_info.get("tenants") or [])
         summary = report.get("summary") or {}
         needs_more_data = bool(summary.get("needs_more_data"))
         active_keys = _active_delegation_keys(agent_state.agent_id)
@@ -2110,6 +2260,155 @@ def spawn_attack_surface_agents(
                         ),
                     )
                 )
+
+        post_auth_candidate_count = 0
+        if include_validation:
+            role_boundary_statuses = {
+                str(item.get("boundary") or "").strip(): str(item.get("status") or "").strip()
+                for item in role_entries
+                if str(item.get("boundary") or "").strip()
+            }
+            bug_gap_statuses = {
+                str(item.get("bug_class") or "").strip(): str(item.get("status") or "").strip()
+                for item in bug_class_entries
+                if str(item.get("bug_class") or "").strip()
+            }
+            for module_row in prioritized_modules:
+                host = str(module_row.get("host") or "").strip()
+                module_name = str(module_row.get("application_module") or "").strip()
+                if not host or not module_name:
+                    continue
+                auth_surfaces = [str(item) for item in list(module_row.get("auth_surfaces") or []) if str(item).strip()]
+                high_value_sections = _post_auth_module_sections(module_row)
+                bug_classes = [
+                    str(item) for item in list(module_row.get("bug_classes") or []) if str(item).strip()
+                ]
+                if not auth_surfaces and not high_value_sections and session_profile_count < 1:
+                    continue
+                coverage_status = str(module_row.get("coverage_status") or "").strip().lower()
+                if coverage_status == "covered" and session_profile_count < 1:
+                    continue
+                focus_hints = _post_auth_focus_hints(module_row)
+                priority = "high"
+                if session_profile_count >= 1:
+                    priority = "critical"
+                elif auth_surfaces or any(
+                    marker in " ".join([*high_value_sections, *bug_classes]).lower()
+                    for marker in ("billing", "admin", "authorization", "workflow", "upload", "tenant")
+                ):
+                    priority = "high"
+                enqueue(
+                    _candidate(
+                        dedupe_key=f"post-auth|{host}|{module_name}",
+                        phase=PHASE_POST_AUTH,
+                        name=f"P1.5 Post-Auth {host}:{module_name}",
+                        priority=priority,
+                        kind="post-auth-coverage",
+                        skills=_post_auth_skills(
+                            module_row,
+                            session_profile_count=session_profile_count,
+                        ),
+                        task=(
+                            f"Delegation key: post-auth|{host}|{module_name}\n"
+                            "Phase: Post-authenticated coverage expansion and deep feature tracing\n"
+                            f"Target module: {module_name} on {host}\n"
+                            f"Stored session profiles: {session_profile_names or ['needs more data']}\n"
+                            f"Stored roles: {session_profile_roles or ['needs more data']}\n"
+                            f"Stored tenants: {session_profile_tenants or ['needs more data']}\n"
+                            f"Auth surfaces: {auth_surfaces or ['needs more data']}\n"
+                            f"High-value sections: {high_value_sections or ['needs more data']}\n"
+                            f"Role coverage snapshot: {role_boundary_statuses or {'needs more data': 'needs more data'}}\n"
+                            f"Bug-class gaps: {bug_gap_statuses or {'needs more data': 'needs more data'}}\n"
+                            f"Focus hints: {focus_hints or ['authz', 'workflow_race']}\n"
+                            "Objective:\n"
+                            "- Treat successful login as the start of coverage, not the finish.\n"
+                            "- If a reusable authenticated context already exists, replay it immediately; otherwise check browser/proxy state and try bootstrap_session_profile_from_browser or extract_session_profiles_from_requests before concluding needs more data.\n"
+                            "- Map the authenticated runtime with map_runtime_surface, mine_additional_attack_surface, and discover_workflows_from_requests before narrowing to single requests.\n"
+                            "- Go beyond menu clicks: trace each authenticated feature flow, hidden route, parameter set, object type, export/import path, and state-changing workflow in this module.\n"
+                            "- Run depth-first authenticated follow-up with run_security_focus_pipeline for authorization plus any hinted injection or workflow classes, instead of stopping after basic browsing.\n"
+                            "- Compare guest, user, other-user, admin, and tenant contexts whenever the saved sessions or proxy history make that possible.\n"
+                            "- Leave explicit coverage updates for runtime, role, workflow, param, object, and bug-class depth, including blocked or needs more data states."
+                        ),
+                    )
+                )
+                post_auth_candidate_count += 1
+
+            if post_auth_candidate_count == 0:
+                top_endpoints = [
+                    {
+                        "host": str(item.get("host") or "").strip(),
+                        "path": str(item.get("path") or "").strip(),
+                        "bug_classes": [
+                            str(value)
+                            for value in list(item.get("bug_classes") or [])
+                            if str(value).strip()
+                        ],
+                    }
+                    for item in list(priorities.get("top_endpoints_next") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("host") or "").strip()
+                    and str(item.get("path") or "").strip()
+                ][:4]
+                endpoint_seed_signal = any(
+                    any(
+                        marker in " ".join([endpoint["path"], *endpoint["bug_classes"]]).lower()
+                        for marker in (
+                            "admin",
+                            "auth",
+                            "authorization",
+                            "billing",
+                            "business",
+                            "checkout",
+                            "coupon",
+                            "export",
+                            "invoice",
+                            "order",
+                            "profile",
+                            "race",
+                            "replay",
+                            "tenant",
+                            "user",
+                            "workflow",
+                        )
+                    )
+                    for endpoint in top_endpoints
+                )
+                if session_profile_count >= 1 or endpoint_seed_signal:
+                    target_host = (
+                        str(top_endpoints[0].get("host") or "").strip()
+                        if top_endpoints
+                        else normalized_target
+                    )
+                    enqueue(
+                        _candidate(
+                            dedupe_key=f"post-auth|{normalized_target}",
+                            phase=PHASE_POST_AUTH,
+                            name=f"P1.5 Post-Auth {target_host or normalized_target}",
+                            priority="critical" if session_profile_count >= 1 else "high",
+                            kind="post-auth-coverage",
+                            skills=[
+                                "authentication_jwt",
+                                "idor",
+                                "business_logic",
+                                "race_conditions",
+                                "xss",
+                            ],
+                            task=(
+                                f"Delegation key: post-auth|{normalized_target}\n"
+                                "Phase: Post-authenticated coverage expansion and deep feature tracing\n"
+                                f"Target scope: {normalized_target}\n"
+                                f"Stored session profiles: {session_profile_names or ['needs more data']}\n"
+                                f"Stored roles: {session_profile_roles or ['needs more data']}\n"
+                                f"Stored tenants: {session_profile_tenants or ['needs more data']}\n"
+                                f"Top authenticated endpoints: {top_endpoints or ['needs more data']}\n"
+                                "Objective:\n"
+                                "- Do not stop at proving the session works. Use the available authenticated context or auth-heavy runtime paths to expand runtime coverage and trace deep feature paths.\n"
+                                "- If no reusable profile exists yet, check browser/proxy state once, try bootstrap_session_profile_from_browser or extract_session_profiles_from_requests, then state needs more data instead of stalling.\n"
+                                "- Refresh runtime/workflow/parameter coverage from authenticated or auth-heavy traffic, then run authz and injection follow-up where the runtime suggests it.\n"
+                                "- Record what was truly covered, what stayed blocked, and what still needs more data."
+                            ),
+                        )
+                    )
 
         if include_validation:
             for endpoint_row in list(priorities.get("top_endpoints_next") or []):

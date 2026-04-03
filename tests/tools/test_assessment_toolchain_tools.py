@@ -22,6 +22,7 @@ from strix.tools.assessment import assessment_creative_actions as creative_actio
 from strix.tools.assessment import assessment_hunt_actions as hunt_actions
 from strix.tools.assessment import assessment_oob_actions as oob_actions
 from strix.tools.assessment import assessment_runtime_actions as runtime_actions
+from strix.tools.assessment import assessment_session_actions as session_actions
 from strix.tools.assessment import assessment_surface_actions as surface_actions
 from strix.tools.assessment import assessment_surface_review_actions as surface_review_actions
 from strix.tools.assessment import assessment_toolchain_actions as toolchain_actions
@@ -105,6 +106,35 @@ def test_security_tool_doctor_reports_available_wrapped_tools(monkeypatch: Any) 
     assert result["tools"][2]["available"] is False
 
 
+def test_security_tool_doctor_marks_incompatible_binary_unavailable(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_resolve_tool_executable",
+        lambda tool_name: f"C:/tools/{tool_name}.exe",
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_execute_tool_command",
+        lambda command, timeout: {
+            "exit_code": 2,
+            "stdout": "",
+            "stderr": "Usage: httpx [OPTIONS] URL\n\nError: No such option: -e",
+        },
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.security_tool_doctor(
+        agent_state=state,
+        tool_names=["httpx"],
+    )
+
+    assert result["success"] is True
+    assert result["available_count"] == 0
+    assert result["tools"][0]["available"] is False
+    assert result["tools"][0]["compatible"] is False
+    assert "incompatible" in str(result["tools"][0]["compatibility_reason"])
+
+
 def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
     monkeypatch: Any,
 ) -> None:
@@ -116,6 +146,7 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
         "wafw00f",
         "katana",
         "nuclei",
+        "ffuf",
         "arjun",
         "dirsearch",
         "wapiti",
@@ -217,7 +248,7 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
         elif tool_name == "nuclei":
             base["findings"] = [{"template_id": "x", "matched_at": "https://api.example.com"}]
             base["hypothesis_seed_count"] = 1
-        elif tool_name in {"arjun", "dirsearch", "wapiti", "zaproxy"}:
+        elif tool_name in {"arjun", "dirsearch", "ffuf", "wapiti", "zaproxy"}:
             base["findings"] = []
         base["finding_count"] = len(base["findings"])
         return base
@@ -246,16 +277,21 @@ def test_run_security_tool_pipeline_blackbox_deep_orchestrates_expected_steps(
         "nuclei",
         "arjun",
         "dirsearch",
+        "ffuf",
         "wapiti",
         "zaproxy",
     ]
+    assert calls[2][1]["top_ports"] == 1000
+    assert calls[3][1]["ports"] == "443"
+    assert calls[9][1]["wordlist_path"].endswith("common-web.txt")
+    assert calls[9][1]["url"].endswith("/FUZZ")
     assert result["discovered_hosts"] == ["api.example.com", "admin.example.com"]
     assert result["live_urls"] == [
         "https://api.example.com",
         "https://admin.example.com/admin",
         "https://api.example.com/graphql",
     ]
-    assert result["step_count"] == 13
+    assert result["step_count"] == 14
     assert result["attack_surface_review_result"]["success"] is True
     assert result["attack_surface_agent_result"]["success"] is True
     assert spawn_calls[0]["target"] == "external"
@@ -378,6 +414,7 @@ def test_run_security_tool_pipeline_proactively_enriches_inventory(monkeypatch: 
     monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", fake_runtime_loader)
     monkeypatch.setattr(toolchain_actions, "_load_mined_surface_artifacts", fake_surface_loader)
     monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", fake_workflow_loader)
+    monkeypatch.setattr(toolchain_actions, "_run_post_auth_deepening", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime_actions, "map_runtime_surface", fake_map_runtime_surface)
     monkeypatch.setattr(
         surface_actions,
@@ -407,6 +444,195 @@ def test_run_security_tool_pipeline_proactively_enriches_inventory(monkeypatch: 
     assert any(step["step"] == "map_runtime_surface" for step in result["steps"])
     assert any(step["step"] == "mine_additional_attack_surface" for step in result["steps"])
     assert any(step["step"] == "discover_workflows_from_requests" for step in result["steps"])
+
+
+def test_run_security_tool_pipeline_post_auth_deepens_runtime_focuses(monkeypatch: Any) -> None:
+    session_profiles = [
+        {
+            "profile_id": "prof_user",
+            "name": "user",
+            "role": "user",
+            "host": "app.test",
+        }
+    ]
+    extract_calls: list[dict[str, Any]] = []
+    differential_calls: list[dict[str, Any]] = []
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: object())
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: list(session_profiles),
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_run_inventory_enrichment",
+        lambda **kwargs: {
+            "runtime_entries": [
+                {
+                    "host": "app.test",
+                    "normalized_path": "/api/orders/123",
+                    "sample_urls": ["https://app.test/api/orders/123"],
+                    "query_params": ["id"],
+                    "body_params": [],
+                    "methods": ["GET"],
+                    "content_types": ["application/json"],
+                },
+                {
+                    "host": "app.test",
+                    "normalized_path": "/coupon/redeem",
+                    "sample_urls": ["https://app.test/coupon/redeem"],
+                    "query_params": [],
+                    "body_params": ["coupon"],
+                    "methods": ["POST"],
+                    "content_types": ["application/json"],
+                },
+                {
+                    "host": "app.test",
+                    "normalized_path": "/api/webhooks",
+                    "sample_urls": ["https://app.test/api/webhooks"],
+                    "query_params": [],
+                    "body_params": ["callback_url"],
+                    "methods": ["POST"],
+                    "content_types": ["application/json"],
+                },
+                {
+                    "host": "app.test",
+                    "normalized_path": "/search",
+                    "sample_urls": ["https://app.test/search?q=report"],
+                    "query_params": ["q"],
+                    "body_params": [],
+                    "methods": ["GET"],
+                    "content_types": ["text/html"],
+                },
+                {
+                    "host": "app.test",
+                    "normalized_path": "/download",
+                    "sample_urls": ["https://app.test/download?file=report.pdf"],
+                    "query_params": ["file"],
+                    "body_params": [],
+                    "methods": ["GET"],
+                    "content_types": ["text/html"],
+                },
+                {
+                    "host": "app.test",
+                    "normalized_path": "/import/xml",
+                    "sample_urls": ["https://app.test/import/xml"],
+                    "query_params": [],
+                    "body_params": [],
+                    "methods": ["POST"],
+                    "content_types": ["application/xml"],
+                },
+            ],
+            "surface_artifacts": [
+                {"kind": "js_route", "host": "app.test", "path": "/render/preview"},
+                {"kind": "js_route", "host": "app.test", "path": "/redirect"},
+            ],
+            "workflows": [
+                {
+                    "workflow_id": "wf_coupon",
+                    "host": "app.test",
+                    "sequence": [
+                        {"path": "/coupon/redeem", "method": "POST", "request_id": "req_coupon"}
+                    ],
+                }
+            ],
+        },
+    )
+
+    def fake_extract_session_profiles_from_requests(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        extract_calls.append(kwargs)
+        session_profiles[:] = [
+            {
+                "profile_id": "prof_user",
+                "name": "user",
+                "role": "user",
+                "host": "app.test",
+            },
+            {
+                "profile_id": "prof_guest",
+                "name": "guest",
+                "role": "anonymous",
+                "host": "app.test",
+            },
+        ]
+        return {"success": True, "profile_count": 2}
+
+    monkeypatch.setattr(
+        session_actions,
+        "extract_session_profiles_from_requests",
+        fake_extract_session_profiles_from_requests,
+    )
+    monkeypatch.setattr(
+        hunt_actions,
+        "run_inventory_differential_hunt",
+        lambda *args, **kwargs: (
+            differential_calls.append(kwargs)
+            or {
+                "success": True,
+                "tool_name": "run_inventory_differential_hunt",
+                "finding_count": 1,
+                "suspicious_count": 1,
+                "critical_impact_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {
+                "success": True,
+                "focus": kwargs["focus"],
+                "step_count": 1,
+                "active_probe_results": [],
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        deep=True,
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_spawn_impact_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    observed_focuses = [call["focus"] for call in focus_calls]
+
+    assert result["success"] is True
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["include_unauthenticated"] is True
+    assert differential_calls[0]["target"] == "web"
+    assert result["post_auth_deepening_result"]["session_profile_count"] == 2
+    assert result["post_auth_deepening_result"]["candidate_url_count"] >= 4
+    assert observed_focuses[:2] == ["authz", "workflow_race"]
+    assert {"sqli", "xss", "ssrf_oob", "path_traversal", "xxe", "open_redirect", "ssti"}.issubset(
+        set(observed_focuses)
+    )
+    assert all(call["auto_build_review"] is False for call in focus_calls)
+    assert all(call["auto_spawn_review_agents"] is False for call in focus_calls)
+    assert any(step["step"] == "extract_session_profiles_from_requests" for step in result["steps"])
+    assert any(step["step"] == "run_inventory_differential_hunt" for step in result["steps"])
+    assert any(step["step"] == "post_auth_focus:authz" for step in result["steps"])
 
 
 def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -> None:
@@ -548,6 +774,22 @@ def test_execute_tool_invocation_allows_tool_args_named_tool_name(
     assert result["tool_name"] == "ffuf"
 
 
+def test_execute_tool_invocation_missing_bulk_coverage_items_returns_example_hint() -> None:
+    result = asyncio.run(
+        execute_tool_invocation(
+            {
+                "toolName": "bulk_record_coverage",
+                "args": {},
+            },
+            agent_state=DummyState("agent_root"),
+        )
+    )
+
+    assert isinstance(result, str)
+    assert "missing required parameter(s): items" in result
+    assert '"items":[{"target":"web"' in result
+
+
 def test_run_security_tool_scan_katana_seeds_crawled_paths(monkeypatch: Any) -> None:
     _patch_scan(
         monkeypatch,
@@ -658,6 +900,36 @@ def test_run_security_tool_scan_returns_skipped_result_when_tool_is_unavailable(
     assert runs["run_count"] == 1
     assert runs["runs"][0]["skipped"] is True
     assert runs["runs"][0]["exit_code"] == 127
+
+
+def test_run_security_tool_scan_returns_skipped_result_when_binary_is_incompatible(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(toolchain_actions, "_resolve_tool_executable", lambda tool_name: tool_name)
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_execute_tool_command",
+        lambda command, timeout: {
+            "exit_code": 2,
+            "stdout": "",
+            "stderr": "Usage: httpx [OPTIONS] URL\n\nError: No such option: -l",
+        },
+    )
+    monkeypatch.setattr(toolchain_actions, "_read_output_file", lambda path: "")
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_scan(
+        agent_state=state,
+        tool_name="httpx",
+        target="external",
+        targets=["https://app.test"],
+    )
+
+    assert result["success"] is True
+    assert result["skipped"] is True
+    assert result["availability"] == "incompatible_tool"
+    assert result["needs_more_data"] is True
+    assert "incompatible" in str(result["skip_reason"])
 
 
 def test_run_security_tool_scan_naabu_seeds_open_ports(monkeypatch: Any) -> None:
@@ -1322,6 +1594,7 @@ def test_run_security_tool_pipeline_auto_escalates_authz_followups(
     monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: object())
     monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
     monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_run_post_auth_deepening", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         toolchain_actions,
         "_load_session_profiles",
@@ -1452,6 +1725,7 @@ def test_run_security_tool_pipeline_auto_escalates_workflow_race_followup(
     monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
     monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
     monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_run_post_auth_deepening", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         workflow_actions,
         "discover_workflows_from_requests",
@@ -3549,10 +3823,12 @@ def test_run_security_tool_pipeline_hybrid_includes_repo_scans(monkeypatch: Any)
         "nuclei",
         "arjun",
         "dirsearch",
+        "arjun",
+        "dirsearch",
         "semgrep",
         "bandit",
         "trivy",
         "trufflehog",
     ]
-    assert result["step_count"] == 11
+    assert result["step_count"] == 13
     assert result["attack_surface_review_result"]["success"] is True

@@ -18,6 +18,8 @@ from strix.tools.assessment import clear_assessment_storage, list_assessment_sta
 from strix.tools.assessment import assessment_browser_actions as browser_assessment_actions
 from strix.tools.assessment import assessment_orchestration_actions as orchestration_actions
 from strix.tools.assessment import assessment_session_actions as session_actions
+from strix.tools.browser.tab_manager import BrowserTabManager
+from strix.tools.context import set_current_agent_id
 
 
 class DummyState:
@@ -67,6 +69,53 @@ class FakeBrowser:
 
     def _run_async(self, coro: Any) -> Any:
         return asyncio.run(coro)
+
+
+class AutoBootstrapBrowser(FakeBrowser):
+    def goto(self, url: str, tab_id: str | None = None) -> dict[str, Any]:
+        resolved_tab_id = tab_id or self.current_page_id
+        assert resolved_tab_id is not None
+        self.pages[resolved_tab_id].url = url
+        return {
+            "tab_id": resolved_tab_id,
+            "url": url,
+            "title": "Dashboard",
+            "screenshot": "",
+            "is_running": True,
+        }
+
+    def click(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
+        resolved_tab_id = tab_id or self.current_page_id
+        assert resolved_tab_id is not None
+        return {
+            "tab_id": resolved_tab_id,
+            "url": self.pages[resolved_tab_id].url,
+            "title": "Dashboard",
+            "screenshot": "",
+            "is_running": True,
+        }
+
+    def press_key(self, key: str, tab_id: str | None = None) -> dict[str, Any]:
+        resolved_tab_id = tab_id or self.current_page_id
+        assert resolved_tab_id is not None
+        return {
+            "tab_id": resolved_tab_id,
+            "url": self.pages[resolved_tab_id].url,
+            "title": "Dashboard",
+            "screenshot": "",
+            "is_running": True,
+        }
+
+    def wait(self, duration: float, tab_id: str | None = None) -> dict[str, Any]:
+        resolved_tab_id = tab_id or self.current_page_id
+        assert resolved_tab_id is not None
+        return {
+            "tab_id": resolved_tab_id,
+            "url": self.pages[resolved_tab_id].url,
+            "title": "Dashboard",
+            "screenshot": "",
+            "is_running": True,
+        }
 
 
 class FakeBrowserManager:
@@ -197,6 +246,8 @@ def setup_function() -> None:
     clear_assessment_storage()
     agents_graph_actions._agent_graph["nodes"].clear()
     agents_graph_actions._agent_graph["edges"].clear()
+    agents_graph_actions._agent_states.clear()
+    set_current_agent_id("default")
 
 
 def test_bootstrap_session_profile_from_browser_extracts_auth_material(monkeypatch: Any) -> None:
@@ -223,6 +274,41 @@ def test_bootstrap_session_profile_from_browser_extracts_auth_material(monkeypat
     assert listed["profiles"][0]["headers"]["X-API-Key"] == "secret-api-key"
     assert listed["profiles"][0]["cookies"]["sid"] == "browser-cookie"
     assert listed["profiles"][0]["base_url"] == "https://app.test"
+
+
+def test_browser_tab_manager_auto_bootstraps_session_after_state_change() -> None:
+    state = DummyState("agent_root")
+    agents_graph_actions._agent_states[state.agent_id] = state
+    set_current_agent_id(state.agent_id)
+
+    manager = BrowserTabManager()
+    manager._set_agent_browser(AutoBootstrapBrowser())
+
+    result = manager.press_key("Enter")
+    listed = session_actions.list_session_profiles(agent_state=state, include_values=True)
+
+    assert result["session_profile_bootstrap"]["auto_bootstrapped"] is True
+    assert "session bootstrapped" in result["message"]
+    assert listed["profile_count"] == 1
+    assert listed["profiles"][0]["name"] == "browser-auto-app-test"
+    assert listed["profiles"][0]["role"] == "authenticated"
+
+
+def test_browser_tab_manager_deduplicates_unchanged_auto_bootstrap() -> None:
+    state = DummyState("agent_root")
+    agents_graph_actions._agent_states[state.agent_id] = state
+    set_current_agent_id(state.agent_id)
+
+    manager = BrowserTabManager()
+    manager._set_agent_browser(AutoBootstrapBrowser())
+
+    first = manager.press_key("Enter")
+    second = manager.wait_browser(0.5)
+    listed = session_actions.list_session_profiles(agent_state=state, include_values=True)
+
+    assert first["session_profile_bootstrap"]["auto_bootstrapped"] is True
+    assert "session_profile_bootstrap" not in second
+    assert listed["profile_count"] == 1
 
 
 def test_confirm_active_artifact_in_browser_records_execution_proof(monkeypatch: Any) -> None:

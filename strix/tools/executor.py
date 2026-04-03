@@ -171,7 +171,28 @@ def _format_schema_hint(tool_name: str, required: set[str], optional: set[str]) 
         parts.append(f"  Required: {', '.join(sorted(required))}")
     if optional:
         parts.append(f"  Optional: {', '.join(sorted(optional))}")
+    example = _tool_invocation_example(tool_name)
+    if example:
+        parts.append(f"  Example: {example}")
     return "\n".join(parts)
+
+
+def _tool_invocation_example(tool_name: str) -> str | None:
+    examples = {
+        "bulk_record_coverage": (
+            '{"items":[{"target":"web","component":"auth","surface":"login flow",'
+            '"status":"in_progress","rationale":"Seeding the ledger before active testing."}],'
+            '"preserve_existing_status":true}'
+        ),
+        "record_coverage": (
+            '{"target":"web","component":"auth","surface":"login flow",'
+            '"status":"in_progress","rationale":"Active testing has started."}'
+        ),
+        "run_security_tool_scan": (
+            '{"tool_name":"httpx","target":"web","targets":["https://app.test"]}'
+        ),
+    }
+    return examples.get(tool_name)
 
 
 async def execute_tool_with_validation(

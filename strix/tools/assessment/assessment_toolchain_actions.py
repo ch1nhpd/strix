@@ -156,6 +156,35 @@ TOOL_OUTPUT_SUFFIXES = {
     "wafw00f": ".json",
     "zaproxy": ".json",
 }
+PROJECTDISCOVERY_TOOLS = {"httpx", "katana", "naabu", "nuclei", "subfinder"}
+INCOMPATIBLE_TOOL_PATTERNS = (
+    "no such option",
+    "unknown option",
+    "unknown flag",
+    "unrecognized arguments",
+    "is not a valid option",
+)
+DEFAULT_HTTPX_PATHS = [
+    "/",
+    "/login",
+    "/admin",
+    "/dashboard",
+    "/graphql",
+    "/openapi.json",
+    "/swagger.json",
+    "/robots.txt",
+    "/security.txt",
+    "/.well-known/security.txt",
+    "/sitemap.xml",
+]
+DEFAULT_FUZZ_WORDLIST_CANDIDATES = [
+    "/usr/share/wordlists/dirb/common.txt",
+    "/usr/share/dirb/wordlists/common.txt",
+    "/usr/share/seclists/Discovery/Web-Content/common.txt",
+    "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt",
+    "C:\\SecLists\\Discovery\\Web-Content\\common.txt",
+    "C:\\SecLists\\Discovery\\Web-Content\\raft-small-directories.txt",
+]
 FINDING_VULNERABILITY_KEYWORDS = {
     "authorization": "authorization",
     "idor": "idor",
@@ -581,6 +610,41 @@ def _resolve_tool_executable(tool_name: str) -> str | None:
             if resolved is not None:
                 return resolved
     return shutil.which(tool_name) or shutil.which(f"{tool_name}.exe")
+
+
+def _bundled_fuzz_wordlist_path() -> str | None:
+    candidate = Path(__file__).resolve().parents[2] / "wordlists" / "common-web.txt"
+    return str(candidate) if candidate.exists() else None
+
+
+def _resolve_effective_wordlist_path(tool_name: str, wordlist_path: str | None) -> str | None:
+    explicit = str(wordlist_path or "").strip()
+    if explicit:
+        return explicit
+    if tool_name != "ffuf":
+        return None
+    for candidate in [*DEFAULT_FUZZ_WORDLIST_CANDIDATES, _bundled_fuzz_wordlist_path()]:
+        if not candidate:
+            continue
+        candidate_path = Path(candidate)
+        if candidate_path.exists():
+            return str(candidate_path)
+    return None
+
+
+def _tool_incompatibility_reason(tool_name: str, output: str, exit_code: int | None = None) -> str | None:
+    lowered = str(output or "").strip().lower()
+    if not lowered:
+        return None
+    if any(pattern in lowered for pattern in INCOMPATIBLE_TOOL_PATTERNS):
+        return (
+            f"{tool_name} executable on PATH appears to be an incompatible command with the same name"
+        )
+    if tool_name in PROJECTDISCOVERY_TOOLS and exit_code not in {None, 0} and "usage:" in lowered:
+        return (
+            f"{tool_name} executable on PATH appears to be an incompatible command with the same name"
+        )
+    return None
 
 
 def _normalize_focus_pipeline_name(focus: str) -> str:
@@ -1475,6 +1539,7 @@ def _record_skipped_tool_run(
     resolved_output_path: str,
     include_findings: bool,
     reason: str,
+    availability: str = "missing_tool",
     command: list[str] | None = None,
 ) -> dict[str, Any]:
     started_at = _utc_now()
@@ -1523,7 +1588,7 @@ def _record_skipped_tool_run(
         "evidence_id": evidence_result.get("evidence_id"),
         "skipped": True,
         "skip_reason": reason,
-        "availability": "missing_tool",
+        "availability": availability,
         "needs_more_data": True,
     }
     store[run_id] = run_record
@@ -1574,6 +1639,51 @@ def _extract_live_urls(findings: list[dict[str, Any]]) -> list[str]:
         if _is_http_url(value):
             urls.append(value)
     return _unique_strings(urls)
+
+
+def _extract_open_ports_by_host(findings: list[dict[str, Any]]) -> dict[str, list[int]]:
+    ports_by_host: dict[str, list[int]] = {}
+    for finding in findings:
+        try:
+            port = int(finding.get("port"))
+        except (TypeError, ValueError):
+            continue
+        host = str(finding.get("host") or finding.get("hostname") or "").strip()
+        if not host:
+            continue
+        host_ports = ports_by_host.setdefault(host, [])
+        if port not in host_ports:
+            host_ports.append(port)
+    for host, ports in ports_by_host.items():
+        ports.sort()
+        ports_by_host[host] = ports
+    return ports_by_host
+
+
+def _ffuf_seed_urls(urls: list[str], *, limit: int) -> list[str]:
+    candidates: list[str] = []
+    for raw_url in urls:
+        parsed = urlparse(str(raw_url).strip())
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        if f"{base}/FUZZ" not in candidates:
+            candidates.append(f"{base}/FUZZ")
+        path_segments = [segment for segment in (parsed.path or "/").split("/") if segment]
+        if not path_segments:
+            continue
+        first_segment = path_segments[0]
+        first_candidate = f"{base}/{first_segment}/FUZZ"
+        if first_candidate not in candidates:
+            candidates.append(first_candidate)
+        parent_segments = path_segments[:-1]
+        if parent_segments:
+            parent_candidate = f"{base}/{'/'.join(parent_segments)}/FUZZ"
+            if parent_candidate not in candidates:
+                candidates.append(parent_candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates[:limit]
 
 
 def _seed_discovery_coverage(
@@ -3396,26 +3506,48 @@ def security_tool_doctor(
         for tool_name in normalized_tools:
             executable = _resolve_tool_executable(tool_name)
             version_output = None
+            compatible = executable is not None
+            compatibility_reason = None
+            probe_exit_code = None
             if executable is not None:
                 version_result = _execute_tool_command(
                     _version_probe_command(tool_name, executable),
                     timeout=5,
                 )
+                probe_exit_code = version_result.get("exit_code")
                 version_output = _truncate(
                     str(version_result.get("stdout") or version_result.get("stderr") or "").strip(),
                     200,
                 ) or None
+                compatibility_reason = _tool_incompatibility_reason(
+                    tool_name,
+                    "\n".join(
+                        [
+                            str(version_result.get("stdout") or ""),
+                            str(version_result.get("stderr") or ""),
+                        ]
+                    ),
+                    exit_code=int(version_result.get("exit_code") or 0),
+                )
+                compatible = compatibility_reason is None
 
             diagnostics.append(
                 {
                     "tool_name": tool_name,
-                    "available": executable is not None,
+                    "available": executable is not None and compatible,
                     "executable": executable,
                     "version_output": version_output,
+                    "compatible": compatible,
+                    "compatibility_reason": compatibility_reason,
+                    "probe_exit_code": probe_exit_code,
                     "recommended_usage": (
                         "Use run_security_tool_scan so results are normalized into the assessment ledger"
-                        if executable is not None
-                        else "Install or expose this executable on PATH before relying on it"
+                        if executable is not None and compatible
+                        else (
+                            "Point PATH at the intended tool binary; the current executable appears incompatible"
+                            if executable is not None
+                            else "Install or expose this executable on PATH before relying on it"
+                        )
                     ),
                 }
             )
@@ -6705,6 +6837,315 @@ def _run_pipeline_auto_followups(
     return followup_results
 
 
+def _runtime_suggests_xxe(runtime_entries: list[dict[str, Any]]) -> bool:
+    xml_markers = ("xml", "soap", "svg", "rss", "atom")
+    for entry in runtime_entries:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("normalized_path") or "").strip().lower()
+        if path.endswith(".xml") or any(marker in path for marker in ("/xml", "/soap", "/wsdl")):
+            return True
+        for content_type in list(entry.get("content_types") or []):
+            lowered = str(content_type).strip().lower()
+            if any(marker in lowered for marker in xml_markers):
+                return True
+    return False
+
+
+def _runtime_entry_parameter_names(entry: dict[str, Any]) -> list[str]:
+    parameters: list[str] = []
+    for field in ("query_params", "body_params", "path_params", "header_params"):
+        for item in list(entry.get(field) or []):
+            normalized = str(item).strip().lower()
+            if normalized and normalized not in parameters:
+                parameters.append(normalized)
+    return parameters
+
+
+def _runtime_suggests_workflow_race(runtime_entries: list[dict[str, Any]]) -> bool:
+    keywords = tuple(AUTO_FOCUS_SIGNAL_KEYWORDS.get("workflow_race") or [])
+    for entry in runtime_entries:
+        if not isinstance(entry, dict):
+            continue
+        methods = {
+            str(method).strip().upper()
+            for method in list(entry.get("methods") or [])
+            if str(method).strip()
+        }
+        if not methods.intersection(STATE_CHANGING_METHODS):
+            continue
+        searchable = " ".join(
+            [
+                str(entry.get("normalized_path") or ""),
+                *[str(item) for item in list(entry.get("query_params") or [])],
+                *[str(item) for item in list(entry.get("body_params") or [])],
+            ]
+        ).lower()
+        if any(keyword in searchable for keyword in keywords):
+            return True
+    return False
+
+
+def _post_auth_runtime_focuses(
+    runtime_entries: list[dict[str, Any]],
+    surface_artifacts: list[dict[str, Any]],
+) -> list[str]:
+    hinted_focuses: list[str] = []
+    runtime_baseline_focuses: list[str] = []
+    for entry in runtime_entries:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("normalized_path") or "").strip().lower()
+        parameters = _runtime_entry_parameter_names(entry)
+        content_types = [
+            str(item).strip().lower()
+            for item in list(entry.get("content_types") or [])
+            if str(item).strip()
+        ]
+        sample_urls = [
+            str(item).strip().lower()
+            for item in list(entry.get("sample_urls") or [])
+            if str(item).strip()
+        ]
+        searchable = " ".join([path, *parameters, *content_types, *sample_urls]).lower()
+
+        if parameters:
+            runtime_baseline_focuses.extend(["sqli", "xss", "ssrf_oob", "path_traversal"])
+        elif path:
+            runtime_baseline_focuses.extend(["xss", "path_traversal"])
+
+        if any(keyword in parameter for keyword in FOCUS_PARAMETER_HINTS["ssrf_oob"] for parameter in parameters):
+            hinted_focuses.append("ssrf_oob")
+        if any(keyword in searchable for keyword in ("callback", "webhook", "proxy", "fetch", "relay")):
+            hinted_focuses.append("ssrf_oob")
+
+        if any(keyword in parameter for keyword in FOCUS_PARAMETER_HINTS["sqli"] for parameter in parameters):
+            hinted_focuses.append("sqli")
+        if any(keyword in searchable for keyword in ("query", "search", "report", "filter", "sort", "analytics")):
+            hinted_focuses.append("sqli")
+
+        if any(keyword in parameter for keyword in FOCUS_PARAMETER_HINTS["xss"] for parameter in parameters):
+            hinted_focuses.append("xss")
+        if any(
+            keyword in searchable
+            for keyword in ("search", "comment", "feedback", "message", "preview", "bio", "description")
+        ):
+            hinted_focuses.append("xss")
+
+        if any(keyword in parameter for keyword in FOCUS_PARAMETER_HINTS["open_redirect"] for parameter in parameters):
+            hinted_focuses.append("open_redirect")
+        if any(keyword in searchable for keyword in ("redirect", "bounce", "continue", "return", "relay")):
+            hinted_focuses.append("open_redirect")
+
+        if any(keyword in parameter for keyword in FOCUS_PARAMETER_HINTS["ssti"] for parameter in parameters):
+            hinted_focuses.append("ssti")
+        if any(keyword in searchable for keyword in ("template", "render")):
+            hinted_focuses.append("ssti")
+
+        if any(
+            keyword in parameter
+            for keyword in FOCUS_PARAMETER_HINTS["path_traversal"]
+            for parameter in parameters
+        ):
+            hinted_focuses.append("path_traversal")
+        if any(
+            keyword in searchable
+            for keyword in ("download", "export", "attachment", "document", "avatar", "image", "file")
+        ):
+            hinted_focuses.append("path_traversal")
+
+        if any(marker in content_type for marker in XML_CONTENT_TYPE_MARKERS for content_type in content_types):
+            hinted_focuses.append("xxe")
+        if any(keyword in searchable for keyword in XML_PATH_KEYWORDS):
+            hinted_focuses.append("xxe")
+
+        if any("multipart/form-data" in content_type for content_type in content_types):
+            hinted_focuses.append("file_upload")
+        if any(
+            keyword in searchable
+            for keyword in ("upload", "avatar", "attachment", "document", "image", "import")
+        ):
+            hinted_focuses.append("file_upload")
+
+    for artifact in surface_artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        searchable = " ".join(
+            [
+                str(artifact.get("kind") or ""),
+                str(artifact.get("path") or ""),
+                str(artifact.get("url") or ""),
+                str(artifact.get("title") or ""),
+            ]
+        ).strip().lower()
+        if not searchable:
+            continue
+        if any(keyword in searchable for keyword in ("redirect", "bounce", "continue")):
+            hinted_focuses.append("open_redirect")
+        if any(keyword in searchable for keyword in ("template", "render")):
+            hinted_focuses.append("ssti")
+        if any(keyword in searchable for keyword in ("upload", "avatar", "attachment", "image")):
+            hinted_focuses.append("file_upload")
+        if any(keyword in searchable for keyword in XML_PATH_KEYWORDS):
+            hinted_focuses.append("xxe")
+
+    deduped: list[str] = []
+    for focus in [*runtime_baseline_focuses, *hinted_focuses]:
+        if focus not in deduped:
+            deduped.append(focus)
+    return deduped
+
+
+def _post_auth_focus_order(
+    *,
+    session_profiles: list[dict[str, Any]],
+    runtime_entries: list[dict[str, Any]],
+    surface_artifacts: list[dict[str, Any]],
+    workflows: list[dict[str, Any]],
+) -> list[str]:
+    focuses: list[str] = []
+    if len(session_profiles) >= 2:
+        focuses.append("authz")
+    if workflows or _runtime_suggests_workflow_race(runtime_entries):
+        focuses.append("workflow_race")
+    focuses.extend(
+        _post_auth_runtime_focuses(
+            runtime_entries,
+            surface_artifacts,
+        )
+    )
+    if runtime_entries and _runtime_suggests_xxe(runtime_entries):
+        focuses.append("xxe")
+    deduped: list[str] = []
+    for focus in focuses:
+        if focus not in deduped:
+            deduped.append(focus)
+    return deduped
+
+
+def _run_post_auth_deepening(
+    agent_state: Any,
+    *,
+    logical_target: str,
+    steps: list[dict[str, Any]],
+    runtime_entries: list[dict[str, Any]],
+    surface_artifacts: list[dict[str, Any]],
+    workflows: list[dict[str, Any]],
+    max_active_targets: int,
+    max_hypotheses: int,
+    reuse_previous_runs: bool,
+) -> dict[str, Any] | None:
+    from .assessment_hunt_actions import run_inventory_differential_hunt
+    from .assessment_session_actions import extract_session_profiles_from_requests
+
+    session_profiles = _load_session_profiles(agent_state)
+    proxy_manager = _get_focus_proxy_manager()
+    if not session_profiles and not runtime_entries and not workflows and not surface_artifacts:
+        return None
+
+    extract_profiles_result = None
+    if len(session_profiles) < 2 and proxy_manager is not None and (
+        runtime_entries or workflows or surface_artifacts
+    ):
+        extract_profiles_result = extract_session_profiles_from_requests(
+            agent_state=agent_state,
+            start_page=1,
+            end_page=2,
+            page_size=30,
+            name_prefix="postauth",
+            include_unauthenticated=True,
+            max_profiles=6,
+        )
+        _append_pipeline_step(
+            steps,
+            step_name="extract_session_profiles_from_requests",
+            result=extract_profiles_result,
+            metadata={"source": "post_auth_deepening"},
+        )
+        if extract_profiles_result.get("success"):
+            session_profiles = _load_session_profiles(agent_state)
+
+    differential_result = None
+    if runtime_entries and len(session_profiles) >= 2:
+        differential_result = run_inventory_differential_hunt(
+            agent_state=agent_state,
+            target=logical_target,
+            max_endpoints=max(6, min(max_hypotheses, 12)),
+            min_priority="normal",
+            include_state_changing=True,
+        )
+        _append_pipeline_step(
+            steps,
+            step_name="run_inventory_differential_hunt",
+            result=differential_result,
+            metadata={"source": "post_auth_deepening"},
+        )
+
+    candidate_urls = _unique_strings(
+        [
+            *_candidate_urls_from_runtime_entries(runtime_entries),
+            *_candidate_urls_from_surface_artifacts(surface_artifacts),
+        ]
+    )
+    primary_url = candidate_urls[0] if candidate_urls else None
+    target_inputs = (
+        [_base_url(primary_url)] if primary_url and _base_url(primary_url) else None
+    )
+
+    focus_results: list[dict[str, Any]] = []
+    for focus in _post_auth_focus_order(
+        session_profiles=session_profiles,
+        runtime_entries=runtime_entries,
+        surface_artifacts=surface_artifacts,
+        workflows=workflows,
+    ):
+        focus_result = run_security_focus_pipeline(
+            agent_state=agent_state,
+            target=logical_target,
+            focus=focus,
+            targets=target_inputs,
+            url=primary_url,
+            max_active_targets=max(2, min(max_active_targets + 1, 4)),
+            max_hypotheses=max(max_hypotheses, 8),
+            reuse_previous_runs=reuse_previous_runs,
+            auto_build_review=False,
+            auto_spawn_review_agents=False,
+            auto_spawn_signal_agents=False,
+            auto_spawn_impact_agents=False,
+            auto_synthesize_hypotheses=False,
+        )
+        _append_pipeline_step(
+            steps,
+            step_name=f"post_auth_focus:{focus}",
+            result=focus_result,
+            metadata={
+                "source": "post_auth_deepening",
+                "primary_url": primary_url,
+                "candidate_url_count": len(candidate_urls),
+            },
+        )
+        focus_results.append(
+            {
+                "focus": focus,
+                "success": bool(focus_result.get("success")),
+                "step_count": int(focus_result.get("step_count") or 0)
+                if isinstance(focus_result, dict)
+                else 0,
+                "active_probe_count": len(list(focus_result.get("active_probe_results") or []))
+                if isinstance(focus_result, dict)
+                else 0,
+            }
+        )
+
+    return {
+        "session_profile_count": len(session_profiles),
+        "candidate_url_count": len(candidate_urls),
+        "extract_profiles_result": extract_profiles_result,
+        "differential_result": differential_result,
+        "focus_results": focus_results,
+    }
+
+
 @register_tool(sandbox_execution=False)
 def run_security_tool_pipeline(
     agent_state: Any,
@@ -6754,6 +7195,7 @@ def run_security_tool_pipeline(
                     "naabu",
                     "katana",
                     "nuclei",
+                    "ffuf",
                     "arjun",
                     "dirsearch",
                     "wafw00f",
@@ -6782,11 +7224,13 @@ def run_security_tool_pipeline(
         discovered_hosts: list[str] = []
         live_urls: list[str] = []
         sqlmap_candidates: list[dict[str, str]] = []
+        default_fuzz_wordlist = _resolve_effective_wordlist_path("ffuf", None)
         attack_surface_review_result = None
         attack_surface_agent_result = None
         strong_signal_agent_result = None
         impact_chain_agent_result = None
         enrichment_result = None
+        post_auth_deepening_result = None
 
         def run_step(
             step_name: str,
@@ -6835,26 +7279,36 @@ def run_security_tool_pipeline(
                 httpx_result = run_step(
                     "httpx",
                     targets=httpx_targets,
-                    paths=(["/", "/login", "/admin", "/graphql", "/openapi.json"] if deep else ["/"]),
+                    paths=(DEFAULT_HTTPX_PATHS if deep else ["/"]),
                     max_seed_items=max_seed_items,
                 )
                 discovered_hosts.extend(_extract_host_targets(httpx_result.get("findings", [])))
                 live_urls.extend(_extract_live_urls(httpx_result.get("findings", [])))
 
             host_targets = _unique_strings(discovered_hosts)[:max_host_targets]
+            naabu_ports_by_host: dict[str, list[int]] = {}
             if host_targets and "naabu" in available_tools:
-                run_step(
+                naabu_result = run_step(
                     "naabu",
                     targets=host_targets,
-                    top_ports=100,
+                    top_ports=(1000 if deep else 200),
                     max_seed_items=max_seed_items,
+                )
+                naabu_ports_by_host = _extract_open_ports_by_host(
+                    list(naabu_result.get("findings") or [])
                 )
 
             if host_targets and deep and "nmap" in available_tools:
+                selected_nmap_targets = host_targets[: max(1, min(max_active_targets, len(host_targets)))]
+                selected_ports: list[int] = []
+                for host in selected_nmap_targets:
+                    selected_ports.extend(naabu_ports_by_host.get(host, []))
+                deduped_ports = sorted({port for port in selected_ports if port > 0})
                 run_step(
                     "nmap",
-                    targets=host_targets[: max(1, min(max_active_targets, len(host_targets)))],
-                    top_ports=20,
+                    targets=selected_nmap_targets,
+                    ports=",".join(str(port) for port in deduped_ports) if deduped_ports else None,
+                    top_ports=None if deduped_ports else 200,
                     service_detection=True,
                     default_scripts=True,
                     max_seed_items=max_seed_items,
@@ -6893,7 +7347,7 @@ def run_security_tool_pipeline(
                     max_hypotheses=max_hypotheses,
                 )
 
-            active_urls = crawl_targets[:max_active_targets]
+            active_urls = _unique_strings([*crawl_targets, *live_urls])[:max_active_targets]
             for active_url in active_urls:
                 if "arjun" in available_tools:
                     arjun_result = run_step(
@@ -6924,6 +7378,16 @@ def run_security_tool_pipeline(
                         max_seed_items=max_seed_items,
                         metadata={"url": active_url},
                     )
+                if "ffuf" in available_tools and default_fuzz_wordlist:
+                    for fuzz_url in _ffuf_seed_urls([active_url], limit=2):
+                        run_step(
+                            "ffuf",
+                            url=fuzz_url,
+                            wordlist_path=default_fuzz_wordlist,
+                            recursion=deep,
+                            max_seed_items=max_seed_items,
+                            metadata={"url": fuzz_url, "wordlist_path": default_fuzz_wordlist},
+                        )
                 if deep and "wapiti" in available_tools:
                     wapiti_result = run_step(
                         "wapiti",
@@ -6989,6 +7453,30 @@ def run_security_tool_pipeline(
                 max_hypotheses=max_hypotheses,
                 include_workflows=deep,
             )
+            if deep and isinstance(enrichment_result, dict):
+                post_auth_deepening_result = _run_post_auth_deepening(
+                    agent_state=agent_state,
+                    logical_target=normalized_target,
+                    steps=steps,
+                    runtime_entries=[
+                        item
+                        for item in list(enrichment_result.get("runtime_entries") or [])
+                        if isinstance(item, dict)
+                    ],
+                    surface_artifacts=[
+                        item
+                        for item in list(enrichment_result.get("surface_artifacts") or [])
+                        if isinstance(item, dict)
+                    ],
+                    workflows=[
+                        item
+                        for item in list(enrichment_result.get("workflows") or [])
+                        if isinstance(item, dict)
+                    ],
+                    max_active_targets=max_active_targets,
+                    max_hypotheses=max_hypotheses,
+                    reuse_previous_runs=reuse_previous_runs,
+                )
 
         successful_steps = [step for step in steps if step.get("success")]
         run_ids = [str(step.get("run_id")) for step in successful_steps if step.get("run_id")]
@@ -7175,6 +7663,7 @@ def run_security_tool_pipeline(
                     and enrichment_result.get("workflows")
                 ),
             },
+            "post_auth_deepening_result": post_auth_deepening_result,
             "correlated_hypothesis_count": len(correlated_hypotheses),
             "auto_followup_count": len(auto_followup_results),
             "auto_followup_results": auto_followup_results,
@@ -7218,6 +7707,7 @@ def run_security_tool_pipeline(
             "live_urls": _unique_strings(live_urls),
             "steps": steps,
             "inventory_enrichment_result": enrichment_result,
+            "post_auth_deepening_result": post_auth_deepening_result,
             "correlated_hypotheses": correlated_hypotheses,
             "auto_followup_results": auto_followup_results,
             "attack_surface_review_result": attack_surface_review_result,
@@ -7315,6 +7805,10 @@ def run_security_tool_scan(
         normalized_dictionary_path = (
             str(dictionary_path).strip() if dictionary_path is not None else None
         )
+        normalized_wordlist_path = _resolve_effective_wordlist_path(
+            normalized_tool_name,
+            wordlist_path,
+        )
 
         if max_seed_items < 1:
             raise ValueError("max_seed_items must be >= 1")
@@ -7372,7 +7866,7 @@ def run_security_tool_scan(
                 targets=normalized_targets,
                 target_path=target_path,
                 url=url,
-                wordlist_path=wordlist_path,
+                wordlist_path=normalized_wordlist_path,
                 raw_request_path=raw_request_path,
                 paths=normalized_paths,
                 headers=normalized_headers,
@@ -7441,6 +7935,30 @@ def run_security_tool_scan(
                 )
             raise
         output_content = _read_output_file(resolved_output_path)
+        incompatibility_reason = _tool_incompatibility_reason(
+            normalized_tool_name,
+            "\n".join([str(execution.get("stdout") or ""), str(execution.get("stderr") or "")]),
+            exit_code=int(execution.get("exit_code") or 0),
+        )
+        if incompatibility_reason is not None:
+            return _record_skipped_tool_run(
+                agent_state,
+                store=store,
+                root_agent_id=root_agent_id,
+                tool_name=normalized_tool_name,
+                logical_target=logical_target,
+                logical_component=logical_component,
+                scope_key=scope_key,
+                scope_payload=scope_payload,
+                resolved_output_path=resolved_output_path,
+                include_findings=include_findings,
+                reason=(
+                    f"{incompatibility_reason}; skipping wrapped scan because this binary does not "
+                    "match the expected security tool interface."
+                ),
+                availability="incompatible_tool",
+                command=command,
+            )
         if normalized_tool_name == "httpx" and _should_retry_httpx_with_basic_flags(
             execution, output_content
         ):
@@ -7449,7 +7967,7 @@ def run_security_tool_scan(
                 targets=normalized_targets,
                 target_path=target_path,
                 url=url,
-                wordlist_path=wordlist_path,
+                wordlist_path=normalized_wordlist_path,
                 raw_request_path=raw_request_path,
                 paths=normalized_paths,
                 headers=normalized_headers,

@@ -357,9 +357,9 @@ def test_spawn_attack_surface_agents_dry_run_builds_phase_swarm(monkeypatch: Any
     assert called is False
     kinds = {item["kind"] for item in result["created_agents"]}
     assert "host-recon" in kinds
+    assert "post-auth-coverage" in kinds
     assert "endpoint-validation" in kinds
     assert "param-pivot" in kinds
-    assert "exposure-chain" in kinds
     assert "chain-validation" in kinds
     assert "blind-spot-closure" in kinds
 
@@ -472,6 +472,8 @@ def test_spawn_attack_surface_agents_host_recon_task_requires_passive_fallback_f
     assert create_calls[0]["name"] == "P1 Recon dashboard.app.test"
     assert "Signal classification: weak-signal" in create_calls[0]["task"]
     assert "Resolve status: needs more data" in create_calls[0]["task"]
+    assert "Start with security_tool_doctor" in create_calls[0]["task"]
+    assert "always include both required parameters target and tool_name" in create_calls[0]["task"]
     assert "do not stop after a single failed request" in create_calls[0]["task"]
     assert "Exhaust passive/off-host recon before concluding blocked" in create_calls[0]["task"]
     assert "Search history specifically for old live URLs, historical IPs, alternate ports" in create_calls[0]["task"]
@@ -504,8 +506,8 @@ def test_spawn_attack_surface_agents_coverage_first_reserves_phase_mix(monkeypat
     assert result["recommended_count"] == 3
     assert [item["phase"] for item in result["created_agents"]] == [
         orchestration_actions.PHASE_RECON,
+        orchestration_actions.PHASE_POST_AUTH,
         orchestration_actions.PHASE_VALIDATION,
-        orchestration_actions.PHASE_GAP_CLOSURE,
     ]
     assert result["phase_plan"]["selected_phase_counts"][orchestration_actions.PHASE_CHAINING] == 0
 
@@ -533,11 +535,73 @@ def test_spawn_attack_surface_agents_depth_first_biases_validation_and_chains(
     assert result["success"] is True
     assert result["strategy"] == "depth_first"
     assert [item["phase"] for item in result["created_agents"]] == [
+        orchestration_actions.PHASE_POST_AUTH,
         orchestration_actions.PHASE_VALIDATION,
-        orchestration_actions.PHASE_CHAINING,
     ]
     assert result["phase_plan"]["selected_phase_counts"][orchestration_actions.PHASE_RECON] == 0
     assert result["phase_plan"]["selected_phase_counts"][orchestration_actions.PHASE_GAP_CLOSURE] == 0
+
+
+def test_spawn_attack_surface_agents_post_auth_phase_uses_saved_sessions_and_module_signals(
+    monkeypatch: Any,
+) -> None:
+    state = DummyState("agent_root")
+    _seed_layered_review(state)
+
+    create_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        orchestration_actions,
+        "list_session_profiles",
+        lambda agent_state, include_values=False, max_items=50: {
+            "success": True,
+            "profile_count": 2,
+            "profiles": [
+                {
+                    "profile_id": "prof_user",
+                    "name": "user",
+                    "role": "user",
+                    "tenant": "tenant-a",
+                },
+                {
+                    "profile_id": "prof_admin",
+                    "name": "admin",
+                    "role": "admin",
+                    "tenant": "tenant-b",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        orchestration_actions,
+        "create_agent",
+        lambda agent_state, task, name, inherit_context=True, skills=None: create_calls.append(
+            {"task": task, "name": name, "skills": skills}
+        )
+        or {
+            "success": True,
+            "agent_id": f"agent_{len(create_calls)}",
+            "active_skills": skills.split(",") if skills else [],
+        },
+    )
+
+    result = orchestration_actions.spawn_attack_surface_agents(
+        agent_state=state,
+        target="web",
+        max_agents=5,
+        dry_run=False,
+        strategy="coverage_first",
+    )
+
+    post_auth_call = next(
+        call for call in create_calls if call["name"] == "P1.5 Post-Auth api.app.test:api"
+    )
+    assert result["success"] is True
+    assert result["phase_plan"]["selected_phase_counts"][orchestration_actions.PHASE_POST_AUTH] == 1
+    assert "Stored session profiles: ['user', 'admin']" in post_auth_call["task"]
+    assert "bootstrap_session_profile_from_browser" in post_auth_call["task"]
+    assert "map_runtime_surface" in post_auth_call["task"]
+    assert "run_security_focus_pipeline" in post_auth_call["task"]
+    assert "authentication_jwt" in str(post_auth_call["skills"])
 
 
 def test_spawn_attack_surface_agents_includes_layered_service_module_object_and_role_tasks(

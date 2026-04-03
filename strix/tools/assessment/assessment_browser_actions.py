@@ -6,6 +6,7 @@ from strix.tools.registry import register_tool
 
 from .assessment_actions import (
     _normalize_non_empty,
+    _stable_id,
     record_coverage,
     record_evidence,
     record_hypothesis,
@@ -32,6 +33,40 @@ CSRF_KEYWORDS = ("csrf", "xsrf")
 API_KEY_KEYWORDS = ("api_key", "apikey", "x-api-key")
 BROWSER_SIGNAL_PREFIX = "__strix_browser_signal__:"
 ACTIVE_BROWSER_ATTRIBUTES = ("onload", "onerror", "onclick", "onmouseover", "href", "src")
+SESSION_COOKIE_KEYWORDS = (
+    "session",
+    "sess",
+    "sid",
+    "auth",
+    "token",
+    "jwt",
+    "remember",
+    "refresh",
+)
+AUTHENTICATED_PATH_HINTS = (
+    "dashboard",
+    "account",
+    "profile",
+    "settings",
+    "admin",
+    "console",
+    "portal",
+    "workspace",
+    "billing",
+    "projects",
+)
+LOGIN_PATH_HINTS = (
+    "login",
+    "signin",
+    "sign-in",
+    "signup",
+    "register",
+    "forgot",
+    "reset",
+    "verify",
+    "auth",
+)
+AUTO_BOOTSTRAP_BROWSER_STATE_ATTR = "_strix_auto_session_bootstrap_state"
 
 
 def _normalize_optional_text(value: str | None) -> str | None:
@@ -225,6 +260,7 @@ async def _collect_browser_material(browser: Any, tab_id: str) -> dict[str, Any]
     return {
         "page_url": page_url,
         "origin": browser_result.get("origin") or "",
+        "title": browser_result.get("title") or "",
         "document_cookie": browser_result.get("cookie") or "",
         "localStorage": browser_result.get("localStorage") or {},
         "sessionStorage": browser_result.get("sessionStorage") or {},
@@ -261,6 +297,199 @@ def _normalize_http_urls(values: list[str] | None) -> list[str]:
         seen.add(candidate)
         normalized.append(candidate)
     return normalized
+
+
+def _extract_session_artifacts(
+    material: dict[str, Any],
+    *,
+    base_url: str | None = None,
+    allow_anonymous: bool = False,
+) -> dict[str, Any]:
+    page_url = str(material.get("page_url") or "")
+    normalized_base_url = _normalize_base_url(base_url) or _normalize_base_url(
+        str(material.get("origin") or "")
+    )
+
+    cookies = {
+        str(item.get("name")): str(item.get("value"))
+        for item in material.get("context_cookies", [])
+        if item.get("name")
+    }
+    cookies.update(_parse_cookie_header(str(material.get("document_cookie") or "")))
+
+    candidate_values = _string_candidates_from_browser_material(material)
+    headers: dict[str, str] = {}
+    authorization = _authorization_header(candidate_values)
+    csrf_token = _choose_value(candidate_values, CSRF_KEYWORDS)
+    api_key = _choose_value(candidate_values, API_KEY_KEYWORDS)
+    if authorization:
+        headers["Authorization"] = authorization
+    if csrf_token:
+        headers["X-CSRF-Token"] = csrf_token
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    if not headers and not cookies and not allow_anonymous:
+        raise ValueError("No reusable authentication material was found in browser state")
+
+    return {
+        "page_url": page_url,
+        "base_url": normalized_base_url,
+        "cookies": cookies,
+        "headers": headers,
+        "candidate_values": candidate_values,
+        "page_title": str(material.get("title") or ""),
+    }
+
+
+def _has_session_cookie_signal(cookies: dict[str, str]) -> bool:
+    for key, value in cookies.items():
+        lowered_key = key.lower()
+        lowered_value = str(value).lower()
+        if any(keyword in lowered_key for keyword in SESSION_COOKIE_KEYWORDS):
+            return True
+        if lowered_value.startswith("eyj") and len(lowered_value) > 20:
+            return True
+    return False
+
+
+def _has_path_hint(page_url: str, hints: tuple[str, ...]) -> bool:
+    parsed = urlparse(page_url)
+    path = f"{parsed.path}?{parsed.query}".lower()
+    return any(hint in path for hint in hints)
+
+
+def _auto_bootstrap_profile_name(page_url: str, base_url: str | None) -> str:
+    parsed = urlparse(base_url or page_url)
+    host = parsed.netloc or "browser"
+    safe_host = host.replace(".", "-").replace(":", "-").replace("_", "-")
+    return f"browser-auto-{safe_host}"
+
+
+def maybe_auto_bootstrap_session_profile_from_browser(
+    agent_state: Any,
+    *,
+    tab_id: str | None = None,
+    source_action: str | None = None,
+    browser: Any | None = None,
+) -> dict[str, Any]:
+    active_browser = browser
+    if active_browser is None:
+        manager = _browser_manager()
+        active_browser = manager._get_agent_browser()
+    if active_browser is None:
+        return {
+            "success": True,
+            "auto_bootstrapped": False,
+            "reason": "browser_not_launched",
+        }
+
+    resolved_tab_id = tab_id or active_browser.current_page_id
+    if not resolved_tab_id or resolved_tab_id not in active_browser.pages:
+        return {
+            "success": True,
+            "auto_bootstrapped": False,
+            "reason": "tab_not_found",
+            "tab_id": resolved_tab_id,
+        }
+
+    material = active_browser._run_async(_collect_browser_material(active_browser, resolved_tab_id))
+    extracted = _extract_session_artifacts(material, allow_anonymous=True)
+    headers = dict(extracted["headers"])
+    cookies = dict(extracted["cookies"])
+    candidate_values = dict(extracted["candidate_values"])
+    page_url = str(extracted["page_url"] or "")
+    base_url = extracted["base_url"]
+
+    strong_auth_signal = bool(headers) or bool(candidate_values)
+    session_cookie_signal = _has_session_cookie_signal(cookies)
+    authenticated_path_signal = _has_path_hint(page_url, AUTHENTICATED_PATH_HINTS)
+    login_path_signal = _has_path_hint(page_url, LOGIN_PATH_HINTS)
+    if not (
+        strong_auth_signal
+        or session_cookie_signal
+        or (bool(cookies) and authenticated_path_signal and not login_path_signal)
+    ):
+        return {
+            "success": True,
+            "auto_bootstrapped": False,
+            "reason": "no_likely_authenticated_material",
+            "tab_id": resolved_tab_id,
+            "page_url": page_url,
+        }
+
+    fingerprint = _stable_id(
+        "browserfp",
+        resolved_tab_id,
+        base_url or "",
+        page_url,
+        json.dumps(headers, sort_keys=True),
+        json.dumps(cookies, sort_keys=True),
+        json.dumps(sorted(candidate_values.keys())),
+    )
+    bootstrap_state = getattr(active_browser, AUTO_BOOTSTRAP_BROWSER_STATE_ATTR, None)
+    if not isinstance(bootstrap_state, dict):
+        bootstrap_state = {}
+        setattr(active_browser, AUTO_BOOTSTRAP_BROWSER_STATE_ATTR, bootstrap_state)
+
+    existing_entry = bootstrap_state.get(resolved_tab_id)
+    if isinstance(existing_entry, dict) and existing_entry.get("fingerprint") == fingerprint:
+        return {
+            "success": True,
+            "auto_bootstrapped": False,
+            "reason": "unchanged_browser_auth_state",
+            "tab_id": resolved_tab_id,
+            "page_url": page_url,
+            "profile_id": existing_entry.get("profile_id"),
+        }
+
+    save_result = save_session_profile(
+        agent_state=agent_state,
+        name=_auto_bootstrap_profile_name(page_url, base_url),
+        headers=headers,
+        cookies=cookies,
+        base_url=base_url,
+        role="authenticated",
+        notes=_build_notes(
+            _normalize_optional_text(
+                f"Automatically bootstrapped after browser action '{source_action or 'unknown'}'."
+            ),
+            page_url=page_url,
+            tab_id=resolved_tab_id,
+            candidate_count=len(candidate_values),
+        ),
+    )
+    if not save_result.get("success"):
+        raise ValueError(str(save_result.get("error") or "session profile save failed"))
+
+    bootstrap_state[resolved_tab_id] = {
+        "fingerprint": fingerprint,
+        "profile_id": save_result.get("profile_id"),
+    }
+    if hasattr(agent_state, "update_context"):
+        agent_state.update_context(
+            "last_auto_bootstrapped_session_profile",
+            {
+                "profile_id": save_result.get("profile_id"),
+                "page_url": page_url,
+                "tab_id": resolved_tab_id,
+                "source_action": source_action,
+            },
+        )
+
+    return {
+        "success": True,
+        "auto_bootstrapped": True,
+        "tab_id": resolved_tab_id,
+        "page_url": page_url,
+        "profile_id": save_result.get("profile_id"),
+        "record": save_result.get("record"),
+        "extracted_material": {
+            "headers": _redact_mapping(headers),
+            "cookies": _redact_mapping(cookies),
+            "sensitive_keys": sorted(candidate_values.keys())[:40],
+        },
+    }
 
 
 def _browser_signal_init_script() -> str:
@@ -434,32 +663,16 @@ def bootstrap_session_profile_from_browser(
             raise ValueError(f"Tab '{resolved_tab_id}' was not found")
 
         material = browser._run_async(_collect_browser_material(browser, resolved_tab_id))
-        page_url = str(material.get("page_url") or "")
-        normalized_base_url = _normalize_base_url(base_url) or _normalize_base_url(
-            str(material.get("origin") or "")
+        extracted = _extract_session_artifacts(
+            material,
+            base_url=base_url,
+            allow_anonymous=allow_anonymous,
         )
-
-        cookies = {
-            str(item.get("name")): str(item.get("value"))
-            for item in material.get("context_cookies", [])
-            if item.get("name")
-        }
-        cookies.update(_parse_cookie_header(str(material.get("document_cookie") or "")))
-
-        candidate_values = _string_candidates_from_browser_material(material)
-        headers: dict[str, str] = {}
-        authorization = _authorization_header(candidate_values)
-        csrf_token = _choose_value(candidate_values, CSRF_KEYWORDS)
-        api_key = _choose_value(candidate_values, API_KEY_KEYWORDS)
-        if authorization:
-            headers["Authorization"] = authorization
-        if csrf_token:
-            headers["X-CSRF-Token"] = csrf_token
-        if api_key:
-            headers["X-API-Key"] = api_key
-
-        if not headers and not cookies and not allow_anonymous:
-            raise ValueError("No reusable authentication material was found in browser state")
+        page_url = str(extracted["page_url"] or "")
+        normalized_base_url = extracted["base_url"]
+        cookies = dict(extracted["cookies"])
+        headers = dict(extracted["headers"])
+        candidate_values = dict(extracted["candidate_values"])
 
         save_result = save_session_profile(
             agent_state=agent_state,

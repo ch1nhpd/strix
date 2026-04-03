@@ -15,6 +15,47 @@ class BrowserTabManager:
 
         self._register_cleanup_handlers()
 
+    def _attach_auto_session_bootstrap(
+        self,
+        result: dict[str, Any],
+        *,
+        source_action: str,
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_tab_id = str(result.get("tab_id") or tab_id or "").strip() or None
+        try:
+            from strix.tools.agents_graph.agents_graph_actions import _agent_states
+            from strix.tools.assessment.assessment_browser_actions import (
+                maybe_auto_bootstrap_session_profile_from_browser,
+            )
+
+            agent_id = get_current_agent_id()
+            agent_state = _agent_states.get(agent_id)
+            if agent_state is None:
+                return result
+            browser = self._get_agent_browser()
+            if browser is None:
+                return result
+
+            bootstrap_result = maybe_auto_bootstrap_session_profile_from_browser(
+                agent_state=agent_state,
+                tab_id=resolved_tab_id,
+                source_action=source_action,
+                browser=browser,
+            )
+        except Exception:
+            return result
+
+        if bootstrap_result.get("auto_bootstrapped"):
+            result["session_profile_bootstrap"] = bootstrap_result
+            profile = bootstrap_result.get("record") or {}
+            profile_name = str(profile.get("name") or "").strip()
+            if profile_name:
+                message = str(result.get("message") or "").strip()
+                if message:
+                    result["message"] = f"{message} [session bootstrapped: {profile_name}]"
+        return result
+
     def _get_agent_browser(self) -> BrowserInstance | None:
         agent_id = get_current_agent_id()
         with self._lock:
@@ -55,7 +96,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to navigate to URL: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="goto",
+                tab_id=tab_id,
+            )
 
     def click(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -68,7 +113,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to click: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="click",
+                tab_id=tab_id,
+            )
 
     def type_text(self, text: str, tab_id: str | None = None) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -107,7 +156,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to go back: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="back",
+                tab_id=tab_id,
+            )
 
     def forward(self, tab_id: str | None = None) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -120,7 +173,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to go forward: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="forward",
+                tab_id=tab_id,
+            )
 
     def new_tab(self, url: str | None = None) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -133,7 +190,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to create new tab: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="new_tab",
+                tab_id=result.get("tab_id"),
+            )
 
     def switch_tab(self, tab_id: str) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -146,7 +207,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to switch tab: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="switch_tab",
+                tab_id=tab_id,
+            )
 
     def close_tab(self, tab_id: str) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -172,7 +237,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to wait: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="wait",
+                tab_id=tab_id,
+            )
 
     def execute_js(self, js_code: str, tab_id: str | None = None) -> dict[str, Any]:
         browser = self._get_agent_browser()
@@ -224,7 +293,11 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to press key: {e}") from e
         else:
-            return result
+            return self._attach_auto_session_bootstrap(
+                result,
+                source_action="press_key",
+                tab_id=tab_id,
+            )
 
     def save_pdf(self, file_path: str, tab_id: str | None = None) -> dict[str, Any]:
         browser = self._get_agent_browser()
