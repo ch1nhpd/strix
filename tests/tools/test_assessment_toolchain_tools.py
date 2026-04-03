@@ -635,6 +635,68 @@ def test_run_security_tool_pipeline_post_auth_deepens_runtime_focuses(monkeypatc
     assert any(step["step"] == "post_auth_focus:authz" for step in result["steps"])
 
 
+def test_run_post_auth_deepening_uses_session_base_url_and_fallback_focuses(
+    monkeypatch: Any,
+) -> None:
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: [
+            {
+                "profile_id": "prof_user",
+                "name": "user",
+                "role": "user",
+                "base_url": "https://app.test",
+            }
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: None)
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {
+                "success": True,
+                "focus": kwargs["focus"],
+                "step_count": 1,
+                "active_probe_results": [],
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    steps: list[dict[str, Any]] = []
+    result = toolchain_actions._run_post_auth_deepening(
+        agent_state=state,
+        logical_target="web",
+        steps=steps,
+        runtime_entries=[],
+        surface_artifacts=[],
+        workflows=[],
+        max_active_targets=2,
+        max_hypotheses=6,
+        reuse_previous_runs=True,
+    )
+
+    observed_focuses = [call["focus"] for call in focus_calls]
+
+    assert result is not None
+    assert result["session_profile_count"] == 1
+    assert result["candidate_url_count"] == 1
+    assert observed_focuses == ["authz", "xss", "sqli", "open_redirect", "path_traversal"]
+    assert all(call["targets"] == ["https://app.test"] for call in focus_calls)
+    assert all(call["url"] == "https://app.test" for call in focus_calls)
+    assert all(call["auto_build_review"] is False for call in focus_calls)
+    assert all(call["auto_spawn_review_agents"] is False for call in focus_calls)
+    assert all(call["auto_spawn_signal_agents"] is False for call in focus_calls)
+    assert all(call["auto_spawn_impact_agents"] is False for call in focus_calls)
+    assert any(step["step"] == "post_auth_focus:authz" for step in steps)
+    assert any(step["step"] == "post_auth_focus:xss" for step in steps)
+
+
 def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -> None:
     _patch_scan(
         monkeypatch,

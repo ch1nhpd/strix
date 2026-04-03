@@ -6996,6 +6996,35 @@ def _post_auth_runtime_focuses(
     return deduped
 
 
+def _session_profile_base_urls(session_profiles: list[dict[str, Any]]) -> list[str]:
+    base_urls: list[str] = []
+    seen: set[str] = set()
+    for profile in session_profiles:
+        candidate = str(profile.get("base_url") or "").strip()
+        if not candidate or not _is_http_url(candidate) or candidate in seen:
+            continue
+        seen.add(candidate)
+        base_urls.append(candidate)
+    return base_urls
+
+
+def _post_auth_fallback_focuses(
+    *,
+    session_profiles: list[dict[str, Any]],
+    candidate_urls: list[str],
+) -> list[str]:
+    focuses: list[str] = []
+    if session_profiles:
+        focuses.append("authz")
+    if candidate_urls:
+        focuses.extend(["xss", "sqli", "open_redirect", "path_traversal"])
+    deduped: list[str] = []
+    for focus in focuses:
+        if focus not in deduped:
+            deduped.append(focus)
+    return deduped
+
+
 def _post_auth_focus_order(
     *,
     session_profiles: list[dict[str, Any]],
@@ -7004,7 +7033,7 @@ def _post_auth_focus_order(
     workflows: list[dict[str, Any]],
 ) -> list[str]:
     focuses: list[str] = []
-    if len(session_profiles) >= 2:
+    if len(session_profiles) >= 1:
         focuses.append("authz")
     if workflows or _runtime_suggests_workflow_race(runtime_entries):
         focuses.append("workflow_race")
@@ -7085,6 +7114,7 @@ def _run_post_auth_deepening(
         [
             *_candidate_urls_from_runtime_entries(runtime_entries),
             *_candidate_urls_from_surface_artifacts(surface_artifacts),
+            *_session_profile_base_urls(session_profiles),
         ]
     )
     primary_url = candidate_urls[0] if candidate_urls else None
@@ -7092,13 +7122,23 @@ def _run_post_auth_deepening(
         [_base_url(primary_url)] if primary_url and _base_url(primary_url) else None
     )
 
+    focus_order = _unique_strings(
+        [
+            *_post_auth_focus_order(
+                session_profiles=session_profiles,
+                runtime_entries=runtime_entries,
+                surface_artifacts=surface_artifacts,
+                workflows=workflows,
+            ),
+            *_post_auth_fallback_focuses(
+                session_profiles=session_profiles,
+                candidate_urls=candidate_urls,
+            ),
+        ]
+    )
+
     focus_results: list[dict[str, Any]] = []
-    for focus in _post_auth_focus_order(
-        session_profiles=session_profiles,
-        runtime_entries=runtime_entries,
-        surface_artifacts=surface_artifacts,
-        workflows=workflows,
-    ):
+    for focus in focus_order:
         focus_result = run_security_focus_pipeline(
             agent_state=agent_state,
             target=logical_target,
