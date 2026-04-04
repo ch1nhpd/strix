@@ -50,12 +50,25 @@ def resolve_strix_model(model_name: str | None) -> tuple[str | None, str | None]
     Returns (api_model, canonical_model):
     - api_model: openai/<base> for API calls (Strix API is OpenAI-compatible)
     - canonical_model: actual provider model name for litellm capability lookups
-    Non-strix models return the same name for both.
+    Provider-less shorthand models that appear in STRIX_MODEL_MAP are normalized
+    to their provider-qualified LiteLLM names for both values.
+    Other non-strix models return the same name for both.
     """
-    if not model_name or not model_name.startswith("strix/"):
-        return model_name, model_name
+    if not model_name:
+        return None, None
 
-    base_model = model_name[6:]
+    normalized_model = str(model_name).strip()
+    if not normalized_model:
+        return None, None
+
+    direct_mapping = STRIX_MODEL_MAP.get(normalized_model)
+    if direct_mapping:
+        return direct_mapping, direct_mapping
+
+    if not normalized_model.startswith("strix/"):
+        return normalized_model, normalized_model
+
+    base_model = normalized_model[6:]
     api_model = f"openai/{base_model}"
     canonical_model = STRIX_MODEL_MAP.get(base_model, api_model)
     return api_model, canonical_model
