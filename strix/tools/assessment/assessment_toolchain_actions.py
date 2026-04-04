@@ -835,6 +835,12 @@ def _normalize_paths(paths: list[str] | None) -> list[str]:
     return normalized
 
 
+def _normalize_parameter_names(parameter_names: list[str] | None) -> list[str]:
+    return _unique_strings(
+        [str(item).strip() for item in (parameter_names or []) if str(item).strip()]
+    )
+
+
 def _normalize_headers(headers: dict[str, str] | None) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for key, value in (headers or {}).items():
@@ -3851,6 +3857,46 @@ def _merge_query_params_into_url(url: str, params: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=urlencode(pairs, doseq=True)))
 
 
+def _focus_parameter_seed_value(focus: str, parameter_name: str) -> str:
+    lowered = str(parameter_name or "").strip().lower()
+    if focus in {"ssrf_oob", "open_redirect"} or any(
+        keyword in lowered
+        for keyword in ("callback", "next", "redirect", "return", "target", "uri", "url")
+    ):
+        return "https://example.com/"
+    if focus == "path_traversal" or any(keyword in lowered for keyword in ("file", "path")):
+        return "report.txt"
+    if focus == "xss":
+        return "search"
+    if focus == "ssti":
+        return "template"
+    return "1"
+
+
+def _seed_candidate_urls_with_parameter_hints(
+    candidate_urls: list[str],
+    *,
+    focus: str,
+    parameter_names: list[str],
+) -> list[str]:
+    if not candidate_urls or not parameter_names:
+        return list(candidate_urls)
+    seeded = list(candidate_urls)
+    for candidate_url in candidate_urls:
+        if not _is_http_url(candidate_url):
+            continue
+        for parameter_name in parameter_names:
+            if _query_parameter_value(candidate_url, parameter_name) is not None:
+                continue
+            seeded.append(
+                _merge_query_params_into_url(
+                    candidate_url,
+                    {parameter_name: _focus_parameter_seed_value(focus, parameter_name)},
+                )
+            )
+    return _unique_strings(seeded)
+
+
 def _load_runtime_inventory_entries(agent_state: Any, target: str) -> list[dict[str, Any]]:
     try:
         from .assessment_runtime_actions import list_runtime_inventory
@@ -3982,6 +4028,33 @@ def _candidate_urls_from_surface_artifacts(surface_artifacts: list[dict[str, Any
         if host and path:
             candidate_urls.append(f"https://{host}{path}")
     return _unique_strings(candidate_urls)
+
+
+def _candidate_urls_from_synthesized_hypotheses(hypotheses: list[dict[str, Any]]) -> list[str]:
+    candidate_urls: list[str] = []
+    for item in hypotheses:
+        if not isinstance(item, dict):
+            continue
+        for candidate_url in list(item.get("candidate_urls") or []):
+            candidate = str(candidate_url).strip()
+            if candidate:
+                candidate_urls.append(candidate)
+    return _unique_strings(candidate_urls)
+
+
+def _merge_unique_dict_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            identity = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(item)
+    return merged
 
 
 def _run_inventory_enrichment(
@@ -5427,6 +5500,117 @@ def _fallback_body_request_context(
     }
 
 
+def _synthetic_authz_contexts(
+    candidate_urls: list[str],
+    *,
+    headers: dict[str, str],
+    max_items: int,
+) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate_url in candidate_urls:
+        normalized_url = str(candidate_url).strip()
+        if not _is_http_url(normalized_url) or normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        context = _fallback_request_context(normalized_url, headers)
+        context["source"] = "synthetic_authz"
+        context["selection_score"] = 2 if _looks_sensitive_path(urlparse(normalized_url).path or "/") else 1
+        contexts.append(context)
+        if len(contexts) >= max_items:
+            break
+    return contexts
+
+
+def _workflow_race_method(url: str, parameter_names: list[str]) -> str:
+    path = urlparse(str(url or "")).path.lower()
+    if any(
+        keyword in path
+        for keyword in [
+            *RACE_SINGLE_USE_TYPES,
+            "approve",
+            "billing",
+            "cart",
+            "checkout",
+            "claim",
+            "coupon",
+            "credit",
+            "order",
+            "payment",
+            "redeem",
+            "refund",
+            "subscription",
+            "transfer",
+            "wallet",
+        ]
+    ):
+        return "POST"
+    if parameter_names and not urlparse(str(url or "")).query:
+        return "POST"
+    return "GET"
+
+
+def _synthetic_workflow_race_plans(
+    candidate_urls: list[str],
+    *,
+    headers: dict[str, str],
+    parameter_names: list[str],
+    max_items: int,
+) -> list[dict[str, Any]]:
+    plans: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate_url in candidate_urls:
+        normalized_url = str(candidate_url).strip()
+        if not _is_http_url(normalized_url) or normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        method = _workflow_race_method(normalized_url, parameter_names)
+        if method == "POST":
+            if parameter_names:
+                body_values = {
+                    name: _focus_parameter_seed_value("workflow_race", name)
+                    for name in parameter_names[:4]
+                }
+                context = _fallback_body_request_context(
+                    normalized_url,
+                    headers,
+                    method="POST",
+                    body=urlencode(list(body_values.items()), doseq=True),
+                    content_type="application/x-www-form-urlencoded",
+                )
+                context["body_params"] = body_values
+            else:
+                context = _fallback_body_request_context(
+                    normalized_url,
+                    headers,
+                    method="POST",
+                    body="",
+                    content_type="application/x-www-form-urlencoded",
+                )
+        else:
+            context = _fallback_request_context(normalized_url, headers)
+            context["method"] = method
+            context["base_request"]["method"] = method
+        context["source"] = "synthetic_workflow_race"
+        context["selection_score"] = 2
+        plans.append(
+            {
+                "workflow": {
+                    "workflow_id": None,
+                    "type": "synthetic",
+                    "priority": "high",
+                    "surface": f"Synthetic workflow race on {urlparse(normalized_url).path or '/'}",
+                },
+                "step": None,
+                "request_context": context,
+                "score": 2,
+            }
+        )
+        if len(plans) >= max_items:
+            break
+    return plans
+
+
 def _path_or_url_contains_keyword(value: str, keywords: tuple[str, ...] | list[str]) -> bool:
     lowered = str(value or "").lower()
     return any(keyword in lowered for keyword in keywords)
@@ -6566,6 +6750,7 @@ def _collect_auto_followup_focuses(
     store: dict[str, TOOL_RUN],
     run_ids: list[str],
     correlated_hypotheses: list[dict[str, Any]],
+    synthesized_hypotheses: list[dict[str, Any]] | None,
     deep: bool,
     max_followups: int,
 ) -> list[dict[str, Any]]:
@@ -6611,6 +6796,8 @@ def _collect_auto_followup_focuses(
                     "tools": [],
                     "reasons": [],
                     "candidate_urls": [],
+                    "parameter_names": [],
+                    "validation_strategies": [],
                 },
             )
             bucket["score"] += score
@@ -6651,6 +6838,8 @@ def _collect_auto_followup_focuses(
                     "tools": [],
                     "reasons": [],
                     "candidate_urls": [],
+                    "parameter_names": [],
+                    "validation_strategies": [],
                 },
             )
             bucket["score"] += 2 + min(int(item.get("signal_count") or 0), 2)
@@ -6673,6 +6862,89 @@ def _collect_auto_followup_focuses(
                 if candidate_url not in bucket["candidate_urls"]:
                     bucket["candidate_urls"].append(candidate_url)
 
+    for item in list(synthesized_hypotheses or []):
+        if not isinstance(item, dict):
+            continue
+        focus_candidates = [
+            str(candidate).strip()
+            for candidate in list(item.get("focus_candidates") or [])
+            if str(candidate).strip()
+        ]
+        if not focus_candidates:
+            mapped_focus = _map_vulnerability_type_to_focus(
+                str(item.get("vulnerability_type") or ""),
+                text=str(item.get("hypothesis") or ""),
+            )
+            if mapped_focus:
+                focus_candidates = [mapped_focus]
+        if not focus_candidates:
+            continue
+
+        parameter_names = _normalize_parameter_names(list(item.get("parameter_names") or []))
+        explicit_candidate_urls = [
+            str(candidate).strip()
+            for candidate in list(item.get("candidate_urls") or [])
+            if str(candidate).strip()
+        ]
+        candidate_urls = _unique_strings(explicit_candidate_urls)
+        if "candidate_urls" not in item and not candidate_urls:
+            host = str(item.get("host") or "").strip()
+            path = str(item.get("path") or "").strip()
+            if host and path:
+                candidate_urls = [f"https://{host}{path}"]
+        validation_strategy = str(item.get("validation_strategy") or "").strip()
+        needs_more_data = bool(item.get("needs_more_data"))
+        priority = str(item.get("priority") or "normal").strip().lower()
+        confidence = "medium" if candidate_urls or parameter_names else "low"
+        verification_state = "correlated" if candidate_urls else "raw"
+        base_score = 2
+        if priority == "critical":
+            base_score += 2
+        elif priority == "high":
+            base_score += 1
+        if candidate_urls:
+            base_score += 1
+        if parameter_names:
+            base_score += 1
+        if needs_more_data and not candidate_urls and focus_candidates[0] not in {"authz", "workflow_race"}:
+            base_score -= 1
+
+        for focus in focus_candidates:
+            bucket = buckets.setdefault(
+                focus,
+                {
+                    "focus": focus,
+                    "confidence": "low",
+                    "verification_state": "raw",
+                    "score": 0,
+                    "tools": [],
+                    "reasons": [],
+                    "candidate_urls": [],
+                    "parameter_names": [],
+                    "validation_strategies": [],
+                },
+            )
+            bucket["score"] += base_score
+            if _confidence_rank(confidence) > _confidence_rank(str(bucket["confidence"])):
+                bucket["confidence"] = confidence
+            if _verification_rank(verification_state) > _verification_rank(
+                str(bucket["verification_state"])
+            ):
+                bucket["verification_state"] = verification_state
+            if "creative_hypothesis" not in bucket["tools"]:
+                bucket["tools"].append("creative_hypothesis")
+            reason = str(item.get("hypothesis") or "").strip()
+            if reason and reason not in bucket["reasons"]:
+                bucket["reasons"].append(reason)
+            for candidate_url in candidate_urls:
+                if candidate_url not in bucket["candidate_urls"]:
+                    bucket["candidate_urls"].append(candidate_url)
+            for parameter_name in parameter_names:
+                if parameter_name not in bucket["parameter_names"]:
+                    bucket["parameter_names"].append(parameter_name)
+            if validation_strategy and validation_strategy not in bucket["validation_strategies"]:
+                bucket["validation_strategies"].append(validation_strategy)
+
     minimum_score = 4 if deep else 5
     candidates = [
         {
@@ -6680,6 +6952,7 @@ def _collect_auto_followup_focuses(
             "primary_url": (
                 str(bucket["candidate_urls"][0]).strip() if list(bucket["candidate_urls"]) else None
             ),
+            "parameter_names": _normalize_parameter_names(list(bucket.get("parameter_names") or [])),
         }
         for bucket in buckets.values()
         if int(bucket.get("score") or 0) >= minimum_score
@@ -6703,6 +6976,7 @@ def _run_pipeline_auto_followups(
     store: dict[str, TOOL_RUN],
     run_ids: list[str],
     correlated_hypotheses: list[dict[str, Any]],
+    synthesized_hypotheses: list[dict[str, Any]] | None,
     deep: bool,
     max_active_targets: int,
     max_hypotheses: int,
@@ -6716,6 +6990,7 @@ def _run_pipeline_auto_followups(
         store=store,
         run_ids=run_ids,
         correlated_hypotheses=correlated_hypotheses,
+        synthesized_hypotheses=synthesized_hypotheses,
         deep=deep,
         max_followups=2 if deep else 1,
     )
@@ -6736,6 +7011,7 @@ def _run_pipeline_auto_followups(
         target_inputs = (
             [_base_url(primary_url)] if primary_url and _base_url(primary_url) else None
         )
+        parameter_names = _normalize_parameter_names(list(candidate.get("parameter_names") or []))
 
         runtime_result = None
         workflow_result = None
@@ -6770,9 +7046,11 @@ def _run_pipeline_auto_followups(
                     result=differential_result,
                     metadata={"trigger_focus": focus, "source_tools": list(candidate["tools"])},
                 )
-            else:
+            if not session_profiles:
+                skipped_reason = "authz follow-up needs at least one session profile"
+            elif not runtime_inventory_available and primary_url is None:
                 skipped_reason = (
-                    "authz follow-up needs runtime inventory and at least two session profiles"
+                    "authz follow-up needs runtime inventory or a concrete URL candidate"
                 )
         elif focus == "workflow_race":
             if not workflow_inventory_available and proxy_manager is not None:
@@ -6788,8 +7066,8 @@ def _run_pipeline_auto_followups(
                     metadata={"trigger_focus": focus, "source_tools": list(candidate["tools"])},
                 )
                 workflow_inventory_available = bool(workflow_result.get("success"))
-            if not workflow_inventory_available:
-                skipped_reason = "workflow race follow-up needs proxy traffic or stored workflows"
+            if not workflow_inventory_available and primary_url is None:
+                skipped_reason = "workflow race follow-up needs proxy traffic, stored workflows, or a concrete URL candidate"
         elif primary_url is None:
             skipped_reason = "focus follow-up needs a concrete URL candidate"
 
@@ -6800,6 +7078,7 @@ def _run_pipeline_auto_followups(
                 focus=focus,
                 targets=target_inputs,
                 url=primary_url,
+                parameter_names=parameter_names or None,
                 max_active_targets=max(1, min(max_active_targets, 2)),
                 max_hypotheses=max_hypotheses,
                 reuse_previous_runs=reuse_previous_runs,
@@ -6825,6 +7104,8 @@ def _run_pipeline_auto_followups(
                 "source_tools": list(candidate.get("tools") or []),
                 "reasons": list(candidate.get("reasons") or []),
                 "primary_url": primary_url,
+                "parameter_names": parameter_names,
+                "validation_strategies": list(candidate.get("validation_strategies") or []),
                 "runtime_result": runtime_result,
                 "workflow_result": workflow_result,
                 "differential_result": differential_result,
@@ -7064,6 +7345,9 @@ def _run_post_auth_deepening(
     max_hypotheses: int,
     reuse_previous_runs: bool,
 ) -> dict[str, Any] | None:
+    from .assessment_browser_actions import map_browser_surface
+    from .assessment_browser_actions import traverse_browser_surface
+    from .assessment_creative_actions import synthesize_attack_hypotheses
     from .assessment_hunt_actions import run_inventory_differential_hunt
     from .assessment_session_actions import extract_session_profiles_from_requests
 
@@ -7071,6 +7355,77 @@ def _run_post_auth_deepening(
     proxy_manager = _get_focus_proxy_manager()
     if not session_profiles and not runtime_entries and not workflows and not surface_artifacts:
         return None
+
+    browser_surface_result = map_browser_surface(
+        agent_state=agent_state,
+        target=logical_target,
+        max_seed_items=max(max_hypotheses * 2, 20),
+    )
+    _append_pipeline_step(
+        steps,
+        step_name="map_browser_surface",
+        result=browser_surface_result,
+        metadata={"source": "post_auth_deepening"},
+    )
+    if browser_surface_result.get("success"):
+        runtime_entries = _merge_unique_dict_rows(
+            runtime_entries,
+            _load_runtime_inventory_entries(agent_state, logical_target),
+        )
+        surface_artifacts = _merge_unique_dict_rows(
+            surface_artifacts,
+            _load_mined_surface_artifacts(agent_state, logical_target),
+        )
+
+    synthesized_result = synthesize_attack_hypotheses(
+        agent_state=agent_state,
+        target=logical_target,
+        max_hypotheses=max(max_hypotheses, 8),
+        persist=False,
+        include_existing_open=True,
+    )
+    _append_pipeline_step(
+        steps,
+        step_name="synthesize_attack_hypotheses",
+        result=synthesized_result,
+        metadata={"source": "post_auth_deepening", "persist": False},
+    )
+    synthesized_hypotheses = (
+        [
+            item
+            for item in list(synthesized_result.get("hypotheses") or [])
+            if isinstance(item, dict)
+        ]
+        if synthesized_result.get("success")
+        else []
+    )
+    prioritized_seed_urls = _candidate_urls_from_synthesized_hypotheses(synthesized_hypotheses)[
+        : max(4, min(max_hypotheses * 2, 12))
+    ]
+
+    browser_traversal_result = traverse_browser_surface(
+        agent_state=agent_state,
+        target=logical_target,
+        max_pages=max(6, min(max_hypotheses * 2, 12)),
+        max_depth=3,
+        max_seed_items=max(max_hypotheses * 3, 24),
+        seed_urls=prioritized_seed_urls or None,
+    )
+    _append_pipeline_step(
+        steps,
+        step_name="traverse_browser_surface",
+        result=browser_traversal_result,
+        metadata={"source": "post_auth_deepening"},
+    )
+    if browser_traversal_result.get("success"):
+        runtime_entries = _merge_unique_dict_rows(
+            runtime_entries,
+            _load_runtime_inventory_entries(agent_state, logical_target),
+        )
+        surface_artifacts = _merge_unique_dict_rows(
+            surface_artifacts,
+            _load_mined_surface_artifacts(agent_state, logical_target),
+        )
 
     extract_profiles_result = None
     if len(session_profiles) < 2 and proxy_manager is not None and (
@@ -7112,6 +7467,7 @@ def _run_post_auth_deepening(
 
     candidate_urls = _unique_strings(
         [
+            *[item for item in prioritized_seed_urls if _is_http_url(item)],
             *_candidate_urls_from_runtime_entries(runtime_entries),
             *_candidate_urls_from_surface_artifacts(surface_artifacts),
             *_session_profile_base_urls(session_profiles),
@@ -7180,6 +7536,10 @@ def _run_post_auth_deepening(
     return {
         "session_profile_count": len(session_profiles),
         "candidate_url_count": len(candidate_urls),
+        "prioritized_seed_url_count": len(prioritized_seed_urls),
+        "synthesized_result": synthesized_result,
+        "browser_surface_result": browser_surface_result,
+        "browser_traversal_result": browser_traversal_result,
         "extract_profiles_result": extract_profiles_result,
         "differential_result": differential_result,
         "focus_results": focus_results,
@@ -7225,6 +7585,8 @@ def run_security_tool_pipeline(
 
         root_agent_id, store = _get_tool_store(agent_state)
         _update_agent_context(agent_state, root_agent_id)
+        if hasattr(agent_state, "update_context"):
+            agent_state.update_context("last_assessment_target", normalized_target)
 
         desired_tools: list[str] = []
         if normalized_mode in {"blackbox", "hybrid"}:
@@ -7530,6 +7892,22 @@ def run_security_tool_pipeline(
             run_ids=run_ids,
             max_hypotheses=max_hypotheses,
         )
+        synthesized_result = None
+        synthesized_hypotheses: list[dict[str, Any]] = []
+        if auto_synthesize_hypotheses:
+            synthesized_result = synthesize_attack_hypotheses(
+                agent_state=agent_state,
+                target=normalized_target,
+                max_hypotheses=max_hypotheses,
+                persist=True,
+                include_existing_open=False,
+            )
+            if synthesized_result.get("success"):
+                synthesized_hypotheses = [
+                    item
+                    for item in list(synthesized_result.get("hypotheses") or [])
+                    if isinstance(item, dict)
+                ]
         auto_followup_results = _run_pipeline_auto_followups(
             agent_state=agent_state,
             logical_target=normalized_target,
@@ -7537,6 +7915,7 @@ def run_security_tool_pipeline(
             store=store,
             run_ids=run_ids,
             correlated_hypotheses=correlated_hypotheses,
+            synthesized_hypotheses=synthesized_hypotheses,
             deep=deep,
             max_active_targets=max_active_targets,
             max_hypotheses=max_hypotheses,
@@ -7547,15 +7926,6 @@ def run_security_tool_pipeline(
         reused_step_count = sum(
             1 for step in successful_steps if bool(step.get("metadata", {}).get("reused_existing_run"))
         )
-        synthesized_result = None
-        if auto_synthesize_hypotheses:
-            synthesized_result = synthesize_attack_hypotheses(
-                agent_state=agent_state,
-                target=normalized_target,
-                max_hypotheses=max_hypotheses,
-                persist=True,
-                include_existing_open=False,
-            )
         if auto_build_review:
             review_scope_targets = _attack_surface_review_scope_targets(
                 provided_targets,
@@ -7585,18 +7955,27 @@ def run_security_tool_pipeline(
                 },
             )
             if auto_spawn_review_agents and attack_surface_review_result.get("success"):
+                review_strategy = "coverage_first"
+                if (
+                    isinstance(post_auth_deepening_result, dict)
+                    and (
+                        int(post_auth_deepening_result.get("session_profile_count") or 0) >= 1
+                        or bool(post_auth_deepening_result.get("browser_surface_result", {}).get("success"))
+                    )
+                ):
+                    review_strategy = "depth_first"
                 attack_surface_agent_result = _spawn_pipeline_attack_surface_agents(
                     agent_state=agent_state,
                     target=normalized_target,
                     max_active_targets=max_active_targets,
-                    strategy="coverage_first",
+                    strategy=review_strategy,
                 )
                 _append_pipeline_step(
                     steps,
                     step_name="spawn_attack_surface_agents",
                     result=attack_surface_agent_result,
                     metadata={
-                        "strategy": "coverage_first",
+                        "strategy": review_strategy,
                         "max_agents": _pipeline_review_agent_limit(max_active_targets),
                         "created_count": (
                             attack_surface_agent_result.get("created_count")
@@ -7857,6 +8236,8 @@ def run_security_tool_scan(
 
         root_agent_id, store = _get_tool_store(agent_state)
         _update_agent_context(agent_state, root_agent_id)
+        if hasattr(agent_state, "update_context"):
+            agent_state.update_context("last_assessment_target", logical_target)
 
         scope_payload = _build_scope_payload(
             tool_name=normalized_tool_name,
@@ -8246,6 +8627,7 @@ def run_security_focus_pipeline(
     focus: str,
     targets: list[str] | None = None,
     url: str | None = None,
+    parameter_names: list[str] | None = None,
     target_path: str | None = None,
     headers: dict[str, str] | None = None,
     jwt_token: str | None = None,
@@ -8279,6 +8661,8 @@ def run_security_focus_pipeline(
         normalized_focus = _normalize_focus_pipeline_name(focus)
         normalized_headers = _normalize_headers(headers)
         normalized_targets = _normalize_targets(targets)
+        normalized_parameter_names = _normalize_parameter_names(parameter_names)
+        normalized_parameter_name_set = {item.lower() for item in normalized_parameter_names}
         if max_active_targets < 1:
             raise ValueError("max_active_targets must be >= 1")
         if max_hypotheses < 1:
@@ -8448,6 +8832,11 @@ def run_security_focus_pipeline(
                     ),
                 ]
             )
+        candidate_urls = _seed_candidate_urls_with_parameter_hints(
+            candidate_urls,
+            focus=normalized_focus,
+            parameter_names=normalized_parameter_names,
+        )
 
         if not runtime_entries:
             runtime_entries = _load_runtime_inventory_entries(agent_state, normalized_target)
@@ -8650,6 +9039,25 @@ def run_security_focus_pipeline(
                             for keyword in FOCUS_PARAMETER_HINTS["ssrf_oob"]
                         ):
                             add_ssrf_candidate(finding)
+            for candidate_url in candidate_urls:
+                parsed = urlparse(candidate_url)
+                for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
+                    lowered_name = name.lower()
+                    if (
+                        lowered_name not in normalized_parameter_name_set
+                        and not any(
+                            keyword in lowered_name for keyword in FOCUS_PARAMETER_HINTS["ssrf_oob"]
+                        )
+                    ):
+                        continue
+                    add_ssrf_candidate(
+                        {
+                            "url": candidate_url,
+                            "path": parsed.path or "/",
+                            "parameter": name,
+                            "source": "parameter_hint",
+                        }
+                    )
 
             primary_finding = suspicious_parameter_findings[0] if suspicious_parameter_findings else {}
             primary_url = (
@@ -8892,7 +9300,11 @@ def run_security_focus_pipeline(
             for candidate_url in candidate_urls:
                 parsed = urlparse(candidate_url)
                 for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
-                    if name.lower() not in FOCUS_PARAMETER_HINTS["sqli"]:
+                    lowered_name = name.lower()
+                    if (
+                        lowered_name not in normalized_parameter_name_set
+                        and lowered_name not in FOCUS_PARAMETER_HINTS["sqli"]
+                    ):
                         continue
                     plan_key = (_sqlmap_candidate_url(candidate_url, name), name, "query")
                     if plan_key in seen_probe_plans:
@@ -9084,7 +9496,11 @@ def run_security_focus_pipeline(
             for candidate_url in candidate_urls:
                 parsed = urlparse(candidate_url)
                 for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
-                    if not any(keyword in name.lower() for keyword in FOCUS_PARAMETER_HINTS["xss"]):
+                    lowered_name = name.lower()
+                    if (
+                        lowered_name not in normalized_parameter_name_set
+                        and not any(keyword in lowered_name for keyword in FOCUS_PARAMETER_HINTS["xss"])
+                    ):
                         continue
                     plan_key = (candidate_url, name, "query")
                     if plan_key in seen_probe_plans:
@@ -9258,8 +9674,12 @@ def run_security_focus_pipeline(
             for candidate_url in candidate_urls:
                 parsed = urlparse(candidate_url)
                 for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
-                    if not any(
-                        keyword in name.lower() for keyword in FOCUS_PARAMETER_HINTS["open_redirect"]
+                    lowered_name = name.lower()
+                    if (
+                        lowered_name not in normalized_parameter_name_set
+                        and not any(
+                            keyword in lowered_name for keyword in FOCUS_PARAMETER_HINTS["open_redirect"]
+                        )
                     ):
                         continue
                     plan_key = (candidate_url, name, "query")
@@ -9431,7 +9851,11 @@ def run_security_focus_pipeline(
             for candidate_url in candidate_urls:
                 parsed = urlparse(candidate_url)
                 for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
-                    if not any(keyword in name.lower() for keyword in FOCUS_PARAMETER_HINTS["ssti"]):
+                    lowered_name = name.lower()
+                    if (
+                        lowered_name not in normalized_parameter_name_set
+                        and not any(keyword in lowered_name for keyword in FOCUS_PARAMETER_HINTS["ssti"])
+                    ):
                         continue
                     plan_key = (candidate_url, name, "query")
                     if plan_key in seen_probe_plans:
@@ -9814,7 +10238,13 @@ def run_security_focus_pipeline(
             for candidate_url in candidate_urls:
                 parsed = urlparse(candidate_url)
                 for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
-                    if not any(keyword in name.lower() for keyword in FOCUS_PARAMETER_HINTS["path_traversal"]):
+                    lowered_name = name.lower()
+                    if (
+                        lowered_name not in normalized_parameter_name_set
+                        and not any(
+                            keyword in lowered_name for keyword in FOCUS_PARAMETER_HINTS["path_traversal"]
+                        )
+                    ):
                         continue
                     plan_key = (candidate_url, name, "query")
                     if plan_key in seen_probe_plans:
@@ -9896,6 +10326,12 @@ def run_security_focus_pipeline(
                 session_profiles=session_profiles,
                 max_items=max(1, min(max_active_targets, 4)),
             )
+            if not authz_contexts and candidate_urls:
+                authz_contexts = _synthetic_authz_contexts(
+                    candidate_urls,
+                    headers=normalized_headers,
+                    max_items=max(1, min(max_active_targets, 4)),
+                )
             selected_request_contexts.extend(authz_contexts)
 
             for request_context in authz_contexts[:max_active_targets]:
@@ -9942,6 +10378,13 @@ def run_security_focus_pipeline(
                 session_profiles=session_profiles,
                 max_items=max(1, min(max_active_targets, 4)),
             )
+            if not race_plans and candidate_urls:
+                race_plans = _synthetic_workflow_race_plans(
+                    candidate_urls,
+                    headers=normalized_headers,
+                    parameter_names=normalized_parameter_names,
+                    max_items=max(1, min(max_active_targets, 4)),
+                )
             selected_request_contexts.extend(
                 [dict(item.get("request_context") or {}) for item in race_plans]
             )
@@ -10151,6 +10594,7 @@ def run_security_focus_pipeline(
             "skipped_tools": skipped_tools,
             "run_ids": run_ids,
             "candidate_urls": candidate_urls[:max_active_targets],
+            "parameter_names": normalized_parameter_names,
             "inventory_enrichment": {
                 "runtime_mapped": bool(runtime_entries),
                 "surface_mined": bool(surface_artifacts),
@@ -10202,6 +10646,7 @@ def run_security_focus_pipeline(
             "successful_step_count": len(successful_steps),
             "run_ids": run_ids,
             "candidate_urls": candidate_urls[:max_active_targets],
+            "parameter_names": normalized_parameter_names,
             "bootstrap_result": bootstrap_result,
             "payload_result": payload_result,
             "harness_result": harness_result,

@@ -455,6 +455,8 @@ def test_run_security_tool_pipeline_post_auth_deepens_runtime_focuses(monkeypatc
             "host": "app.test",
         }
     ]
+    browser_surface_calls: list[dict[str, Any]] = []
+    browser_traversal_calls: list[dict[str, Any]] = []
     extract_calls: list[dict[str, Any]] = []
     differential_calls: list[dict[str, Any]] = []
     focus_calls: list[dict[str, Any]] = []
@@ -550,6 +552,136 @@ def test_run_security_tool_pipeline_post_auth_deepens_runtime_focuses(monkeypatc
             ],
         },
     )
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "map_browser_surface",
+        lambda *args, **kwargs: (
+            browser_surface_calls.append(kwargs)
+            or {
+                "success": True,
+                "discovered_count": 3,
+                "inventory": [
+                    {
+                        "host": "app.test",
+                        "normalized_path": "/billing/export",
+                        "methods": ["POST"],
+                        "query_params": [],
+                        "body_params": ["format"],
+                        "content_types": ["text/html"],
+                        "auth_hints": ["browser_authenticated"],
+                        "sources": ["browser_dom"],
+                        "origins": ["browser"],
+                        "sample_urls": ["https://app.test/billing/export"],
+                        "sample_request_ids": [],
+                        "observed_count": 1,
+                        "priority": "high",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "traverse_browser_surface",
+        lambda *args, **kwargs: (
+            browser_traversal_calls.append(kwargs)
+            or {
+                "success": True,
+                "pages_visited": 4,
+                "traversed_pages": [
+                    {"url": "https://app.test/settings/profile", "depth": 1},
+                    {"url": "https://app.test/admin/users", "depth": 1},
+                    {"url": "https://app.test/billing/invoices", "depth": 2},
+                ],
+                "inventory": [
+                    {
+                        "host": "app.test",
+                        "normalized_path": "/billing/invoices",
+                        "methods": ["GET"],
+                        "query_params": [],
+                        "body_params": [],
+                        "content_types": ["text/html"],
+                        "auth_hints": ["browser_authenticated"],
+                        "sources": ["browser_traversal"],
+                        "origins": ["browser_traversal"],
+                        "sample_urls": ["https://app.test/billing/invoices"],
+                        "sample_request_ids": [],
+                        "observed_count": 1,
+                        "priority": "high",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_runtime_inventory_entries",
+        lambda *args, **kwargs: [
+            {
+                "host": "app.test",
+                "normalized_path": "/api/orders/123",
+                "sample_urls": ["https://app.test/api/orders/123"],
+                "query_params": ["id"],
+                "body_params": [],
+                "methods": ["GET"],
+                "content_types": ["application/json"],
+            },
+            {
+                "host": "app.test",
+                "normalized_path": "/coupon/redeem",
+                "sample_urls": ["https://app.test/coupon/redeem"],
+                "query_params": [],
+                "body_params": ["coupon"],
+                "methods": ["POST"],
+                "content_types": ["application/json"],
+            },
+            {
+                "host": "app.test",
+                "normalized_path": "/api/webhooks",
+                "sample_urls": ["https://app.test/api/webhooks"],
+                "query_params": [],
+                "body_params": ["callback_url"],
+                "methods": ["POST"],
+                "content_types": ["application/json"],
+            },
+            {
+                "host": "app.test",
+                "normalized_path": "/search",
+                "sample_urls": ["https://app.test/search?q=report"],
+                "query_params": ["q"],
+                "body_params": [],
+                "methods": ["GET"],
+                "content_types": ["text/html"],
+            },
+            {
+                "host": "app.test",
+                "normalized_path": "/download",
+                "sample_urls": ["https://app.test/download?file=report.pdf"],
+                "query_params": ["file"],
+                "body_params": [],
+                "methods": ["GET"],
+                "content_types": ["text/html"],
+            },
+            {
+                "host": "app.test",
+                "normalized_path": "/import/xml",
+                "sample_urls": ["https://app.test/import/xml"],
+                "query_params": [],
+                "body_params": [],
+                "methods": ["POST"],
+                "content_types": ["application/xml"],
+            },
+            {
+                "host": "app.test",
+                "normalized_path": "/billing/export",
+                "sample_urls": ["https://app.test/billing/export"],
+                "query_params": [],
+                "body_params": ["format"],
+                "methods": ["POST"],
+                "content_types": ["text/html"],
+            },
+        ],
+    )
 
     def fake_extract_session_profiles_from_requests(*args: Any, **kwargs: Any) -> dict[str, Any]:
         extract_calls.append(kwargs)
@@ -619,11 +751,18 @@ def test_run_security_tool_pipeline_post_auth_deepens_runtime_focuses(monkeypatc
     observed_focuses = [call["focus"] for call in focus_calls]
 
     assert result["success"] is True
+    assert len(browser_surface_calls) == 1
+    assert browser_surface_calls[0]["target"] == "web"
+    assert len(browser_traversal_calls) == 1
+    assert browser_traversal_calls[0]["target"] == "web"
     assert len(extract_calls) == 1
     assert extract_calls[0]["include_unauthenticated"] is True
     assert differential_calls[0]["target"] == "web"
     assert result["post_auth_deepening_result"]["session_profile_count"] == 2
     assert result["post_auth_deepening_result"]["candidate_url_count"] >= 4
+    assert result["post_auth_deepening_result"]["browser_surface_result"]["success"] is True
+    assert result["post_auth_deepening_result"]["browser_traversal_result"]["success"] is True
+    assert result["post_auth_deepening_result"]["browser_traversal_result"]["pages_visited"] == 4
     assert observed_focuses[:2] == ["authz", "workflow_race"]
     assert {"sqli", "xss", "ssrf_oob", "path_traversal", "xxe", "open_redirect", "ssti"}.issubset(
         set(observed_focuses)
@@ -632,6 +771,8 @@ def test_run_security_tool_pipeline_post_auth_deepens_runtime_focuses(monkeypatc
     assert all(call["auto_spawn_review_agents"] is False for call in focus_calls)
     assert any(step["step"] == "extract_session_profiles_from_requests" for step in result["steps"])
     assert any(step["step"] == "run_inventory_differential_hunt" for step in result["steps"])
+    assert any(step["step"] == "map_browser_surface" for step in result["steps"])
+    assert any(step["step"] == "traverse_browser_surface" for step in result["steps"])
     assert any(step["step"] == "post_auth_focus:authz" for step in result["steps"])
 
 
@@ -686,6 +827,7 @@ def test_run_post_auth_deepening_uses_session_base_url_and_fallback_focuses(
     assert result is not None
     assert result["session_profile_count"] == 1
     assert result["candidate_url_count"] == 1
+    assert result["browser_traversal_result"]["available"] is False
     assert observed_focuses == ["authz", "xss", "sqli", "open_redirect", "path_traversal"]
     assert all(call["targets"] == ["https://app.test"] for call in focus_calls)
     assert all(call["url"] == "https://app.test" for call in focus_calls)
@@ -693,8 +835,113 @@ def test_run_post_auth_deepening_uses_session_base_url_and_fallback_focuses(
     assert all(call["auto_spawn_review_agents"] is False for call in focus_calls)
     assert all(call["auto_spawn_signal_agents"] is False for call in focus_calls)
     assert all(call["auto_spawn_impact_agents"] is False for call in focus_calls)
+    assert any(step["step"] == "traverse_browser_surface" for step in steps)
     assert any(step["step"] == "post_auth_focus:authz" for step in steps)
     assert any(step["step"] == "post_auth_focus:xss" for step in steps)
+
+
+def test_run_post_auth_deepening_passes_synthesized_candidate_urls_to_browser_traversal(
+    monkeypatch: Any,
+) -> None:
+    traversal_calls: list[dict[str, Any]] = []
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: [
+            {
+                "profile_id": "prof_user",
+                "name": "user",
+                "role": "user",
+                "base_url": "https://app.test",
+            }
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: None)
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "map_browser_surface",
+        lambda *args, **kwargs: {"success": True, "discovered_count": 2},
+    )
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "traverse_browser_surface",
+        lambda *args, **kwargs: (
+            traversal_calls.append(kwargs)
+            or {
+                "success": True,
+                "pages_visited": 1,
+                "traversed_pages": [
+                    {"url": "https://app.test/admin/beta/users?tenantId=1", "depth": 1}
+                ],
+                "inventory": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_mined_surface_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {
+            "success": True,
+            "hypotheses": [
+                {
+                    "hypothesis": "Hidden beta admin path may expose tenant-scoped admin data",
+                    "component": "source_map:app.test/admin/beta/users",
+                    "vulnerability_type": "idor",
+                    "priority": "high",
+                    "rationale": "Hidden route recovered from client-side artifacts.",
+                    "focus_candidates": ["authz"],
+                    "candidate_urls": [
+                        "https://app.test/admin/beta/users?tenantId=1",
+                        "/settings/security/mfa",
+                    ],
+                    "parameter_names": ["tenantId"],
+                    "needs_more_data": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {
+                "success": True,
+                "focus": kwargs["focus"],
+                "step_count": 1,
+                "active_probe_results": [],
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    steps: list[dict[str, Any]] = []
+    result = toolchain_actions._run_post_auth_deepening(
+        agent_state=state,
+        logical_target="web",
+        steps=steps,
+        runtime_entries=[],
+        surface_artifacts=[],
+        workflows=[],
+        max_active_targets=2,
+        max_hypotheses=6,
+        reuse_previous_runs=True,
+    )
+
+    assert result is not None
+    assert traversal_calls[0]["seed_urls"] == [
+        "https://app.test/admin/beta/users?tenantId=1",
+        "/settings/security/mfa",
+    ]
+    assert result["prioritized_seed_url_count"] == 2
+    assert result["candidate_url_count"] == 2
+    assert any(step["step"] == "synthesize_attack_hypotheses" for step in steps)
+    assert focus_calls[0]["url"] == "https://app.test/admin/beta/users?tenantId=1"
+    assert focus_calls[0]["targets"] == ["https://app.test"]
 
 
 def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -> None:
@@ -1826,6 +2073,226 @@ def test_run_security_tool_pipeline_auto_escalates_workflow_race_followup(
     assert any(step["step"] == "focus:workflow_race" for step in result["steps"])
 
 
+def test_run_security_tool_pipeline_auto_escalates_synthesized_ssrf_followup(
+    monkeypatch: Any,
+) -> None:
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {
+            "success": True,
+            "hypothesis_count": 1,
+            "persisted_count": 0,
+            "hypotheses": [
+                {
+                    "hypothesis": "Source map hint suggests callback trust on app.test upload flow",
+                    "component": "surface:app.test",
+                    "vulnerability_type": "ssrf",
+                    "priority": "high",
+                    "focus_candidates": ["ssrf_oob"],
+                    "candidate_urls": ["https://app.test/api/upload"],
+                    "parameter_names": ["callbackUrl"],
+                    "validation_strategy": "parameter_probe_with_redirect_payloads",
+                    "needs_more_data": False,
+                }
+            ],
+            "evidence_result": {"success": True},
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [{"tool_name": "httpx", "available": True, "executable": "httpx"}],
+        },
+    )
+
+    def fake_run_security_tool_scan(
+        agent_state: Any,
+        tool_name: str,
+        target: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        findings = [{"url": "https://app.test", "status_code": 200}] if tool_name == "httpx" else []
+        root_agent_id, store = toolchain_actions._get_tool_store(agent_state)
+        store[f"run_{tool_name}"] = {
+            "root_agent_id": root_agent_id,
+            "run_id": f"run_{tool_name}",
+            "tool_name": tool_name,
+            "target": target,
+            "findings": findings,
+            "updated_at": "2026-04-04T00:00:00Z",
+        }
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": len(findings),
+            "discovery_seed_count": len(findings),
+            "hypothesis_seed_count": 0,
+            "findings": findings,
+        }
+
+    monkeypatch.setattr(toolchain_actions, "run_security_tool_scan", fake_run_security_tool_scan)
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_run_inventory_enrichment",
+        lambda *args, **kwargs: {
+            "runtime_entries": [],
+            "surface_artifacts": [],
+            "workflows": [],
+            "runtime_result": None,
+            "surface_result": None,
+            "workflow_result": None,
+        },
+    )
+    monkeypatch.setattr(toolchain_actions, "_run_post_auth_deepening", lambda *args, **kwargs: None)
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {
+                "success": True,
+                "focus": kwargs["focus"],
+                "candidate_urls": [kwargs.get("url")],
+                "parameter_names": list(kwargs.get("parameter_names") or []),
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        deep=True,
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_spawn_impact_agents=False,
+    )
+
+    assert result["success"] is True
+    assert focus_calls[0]["focus"] == "ssrf_oob"
+    assert focus_calls[0]["url"] == "https://app.test/api/upload"
+    assert focus_calls[0]["parameter_names"] == ["callbackUrl"]
+    assert result["auto_followup_results"][0]["focus"] == "ssrf_oob"
+    assert result["auto_followup_results"][0]["parameter_names"] == ["callbackUrl"]
+
+
+def test_run_security_tool_pipeline_auto_escalates_synthesized_authz_followup_without_runtime_inventory(
+    monkeypatch: Any,
+) -> None:
+    focus_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {
+            "success": True,
+            "hypothesis_count": 1,
+            "persisted_count": 0,
+            "hypotheses": [
+                {
+                    "hypothesis": "Hidden admin route may expose undocumented authorization on app.test",
+                    "component": "surface:app.test",
+                    "vulnerability_type": "authorization",
+                    "priority": "critical",
+                    "focus_candidates": ["authz"],
+                    "candidate_urls": ["https://app.test/admin/beta/users?tenantId=1"],
+                    "parameter_names": ["tenantId"],
+                    "validation_strategy": "hidden_route_direct_replay",
+                    "needs_more_data": False,
+                }
+            ],
+            "evidence_result": {"success": True},
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {
+            "success": True,
+            "tools": [{"tool_name": "httpx", "available": True, "executable": "httpx"}],
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_tool_scan",
+        lambda agent_state, tool_name, target, **kwargs: {
+            "success": True,
+            "tool_name": tool_name,
+            "target": target,
+            "run_id": f"run_{tool_name}",
+            "finding_count": 0,
+            "discovery_seed_count": 0,
+            "hypothesis_seed_count": 0,
+            "findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_run_inventory_enrichment",
+        lambda *args, **kwargs: {
+            "runtime_entries": [],
+            "surface_artifacts": [],
+            "workflows": [],
+            "runtime_result": None,
+            "surface_result": None,
+            "workflow_result": None,
+        },
+    )
+    monkeypatch.setattr(toolchain_actions, "_run_post_auth_deepening", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: [
+            {"profile_id": "sess_user", "name": "user", "role": "user", "base_url": "https://app.test"},
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: None)
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {
+                "success": True,
+                "focus": kwargs["focus"],
+                "candidate_urls": [kwargs.get("url")],
+                "parameter_names": list(kwargs.get("parameter_names") or []),
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_tool_pipeline(
+        agent_state=state,
+        target="web",
+        mode="blackbox",
+        url="https://app.test",
+        deep=True,
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_spawn_impact_agents=False,
+    )
+
+    assert result["success"] is True
+    assert focus_calls[0]["focus"] == "authz"
+    assert focus_calls[0]["url"] == "https://app.test/admin/beta/users?tenantId=1"
+    assert focus_calls[0]["parameter_names"] == ["tenantId"]
+    assert result["auto_followup_results"][0]["focus"] == "authz"
+    assert result["auto_followup_results"][0]["skipped"] is False
+
+
 def test_run_security_focus_pipeline_auto_builds_attack_surface_review(monkeypatch: Any) -> None:
     review_calls: list[dict[str, Any]] = []
     spawn_calls: list[dict[str, Any]] = []
@@ -2249,6 +2716,79 @@ def test_run_security_focus_pipeline_uses_surface_artifact_candidate_urls(
 
     assert result["success"] is True
     assert arjun_calls[0]["url"] == "https://app.test/search"
+
+
+def test_run_security_focus_pipeline_uses_explicit_parameter_hints(
+    monkeypatch: Any,
+) -> None:
+    probe_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "generate_contextual_payloads",
+        lambda *args, **kwargs: {
+            "success": True,
+            "variant_count": 1,
+            "variants": [{"payload": "<svg/onload=alert(1)>", "encoding": "raw"}],
+        },
+    )
+    monkeypatch.setattr(
+        validation_actions,
+        "payload_probe_harness",
+        lambda *args, **kwargs: (
+            probe_calls.append(kwargs)
+            or {
+                "success": True,
+                "tool_name": "payload_probe_harness",
+                "suspicious_observations": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_run_inventory_enrichment",
+        lambda *args, **kwargs: {
+            "runtime_entries": [],
+            "surface_artifacts": [],
+            "workflows": [],
+            "runtime_result": None,
+            "surface_result": None,
+            "workflow_result": None,
+        },
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_mined_surface_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="focus-target",
+        focus="xss",
+        url="https://app.test/search",
+        parameter_names=["q"],
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_spawn_impact_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert any("?q=search" in item for item in result["candidate_urls"])
+    assert probe_calls[0]["parameter_name"] == "q"
+    assert probe_calls[0]["base_request"]["url"].endswith("/search?q=search")
 
 
 def test_run_security_focus_pipeline_auth_jwt_uses_specialized_steps(monkeypatch: Any) -> None:
@@ -2944,6 +3484,58 @@ def test_run_security_focus_pipeline_authz_uses_role_matrix(monkeypatch: Any) ->
     assert matrix_calls[0]["baseline_case"] == "admin"
     assert [case["name"] for case in matrix_calls[0]["cases"]] == ["guest", "admin", "user"]
     assert matrix_calls[0]["cases"][0]["url"] == "http://app.test/api/orders/123"
+
+
+def test_run_security_focus_pipeline_authz_uses_synthetic_url_context(
+    monkeypatch: Any,
+) -> None:
+    matrix_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: [
+            {"profile_id": "sess_user", "name": "user", "role": "user", "base_url": "https://app.test"},
+            {"profile_id": "sess_admin", "name": "admin", "role": "admin", "base_url": "https://app.test"},
+        ],
+    )
+    monkeypatch.setattr(
+        validation_actions,
+        "role_matrix_test",
+        lambda *args, **kwargs: (
+            matrix_calls.append(kwargs)
+            or {"success": True, "tool_name": "role_matrix_test", "suspicious_matches": []}
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="web",
+        focus="authz",
+        url="https://app.test/admin/beta/users?tenantId=1",
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_spawn_impact_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["request_contexts"][0]["source"] == "synthetic_authz"
+    assert matrix_calls[0]["url"] == "https://app.test/admin/beta/users?tenantId=1"
+    assert [case["name"] for case in matrix_calls[0]["cases"]] == ["guest", "admin", "user"]
 
 
 def test_run_security_focus_pipeline_path_traversal_uses_payload_probe(monkeypatch: Any) -> None:
@@ -3799,6 +4391,53 @@ def test_run_security_focus_pipeline_workflow_race_uses_race_harness(monkeypatch
     assert len(race_calls[0]["requests"]) == 2
     assert race_calls[0]["requests"][0]["method"] == "POST"
     assert race_calls[0]["requests"][0]["json_body"] == {"coupon": "SAVE50"}
+
+
+def test_run_security_focus_pipeline_workflow_race_uses_synthetic_url_context(
+    monkeypatch: Any,
+) -> None:
+    race_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        toolchain_actions,
+        "security_tool_doctor",
+        lambda agent_state, tool_names=None: {"success": True, "tools": []},
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_runtime_inventory_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_discovered_workflows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(toolchain_actions, "_load_session_profiles", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        validation_actions,
+        "race_condition_harness",
+        lambda *args, **kwargs: (
+            race_calls.append(kwargs)
+            or {"success": True, "tool_name": "race_condition_harness", "anomalies": []}
+        ),
+    )
+
+    state = DummyState("agent_root")
+    result = toolchain_actions.run_security_focus_pipeline(
+        agent_state=state,
+        target="web",
+        focus="workflow_race",
+        url="https://app.test/coupon/redeem",
+        parameter_names=["coupon"],
+        auto_build_review=False,
+        auto_spawn_review_agents=False,
+        auto_spawn_signal_agents=False,
+        auto_spawn_impact_agents=False,
+        auto_synthesize_hypotheses=False,
+    )
+
+    assert result["success"] is True
+    assert result["request_contexts"][0]["source"] == "synthetic_workflow_race"
+    assert race_calls[0]["requests"][0]["method"] == "POST"
+    assert race_calls[0]["requests"][0]["body"] == "coupon=1"
+    assert race_calls[0]["expect_single_success"] is True
 
 
 def test_run_security_tool_pipeline_hybrid_includes_repo_scans(monkeypatch: Any) -> None:

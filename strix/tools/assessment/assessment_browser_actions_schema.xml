@@ -66,3 +66,51 @@
     </parameter>
   </parameters>
 </tool>
+
+<tool name="map_browser_surface">
+  <description>Extract browser-visible links, forms, route hints, and UI modules from the active browser tab, merge them into runtime inventory, and seed coverage so authenticated app features are not skipped just because proxy/runtime capture is still shallow.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label used for runtime inventory, coverage, and evidence recording.</description>
+    </parameter>
+    <parameter name="tab_id" required="false">
+      <description>Optional browser tab identifier. Defaults to the currently active tab.</description>
+    </parameter>
+    <parameter name="max_seed_items" required="false">
+      <description>Maximum number of browser-discovered endpoints to seed into coverage and the runtime inventory snapshot. Default: 40.</description>
+    </parameter>
+  </parameters>
+</tool>
+
+<tool name="traverse_browser_surface">
+  <description>Follow browser-visible same-origin navigation candidates from the active tab, visit additional pages with the current authenticated browser context, and merge the newly reached app surface into runtime coverage.</description>
+  <parameters>
+    <parameter name="target" required="true">
+      <description>Logical target label used for runtime inventory, coverage, and evidence recording.</description>
+    </parameter>
+    <parameter name="tab_id" required="false">
+      <description>Optional browser tab identifier. Defaults to the currently active tab.</description>
+    </parameter>
+    <parameter name="max_pages" required="false">
+      <description>Maximum number of additional pages to visit beyond the starting tab. Default: 6.</description>
+    </parameter>
+    <parameter name="max_depth" required="false">
+      <description>Maximum navigation depth from the starting page. Default: 2.</description>
+    </parameter>
+    <parameter name="max_clicks" required="false">
+      <description>Maximum number of safe click-derived UI states to explore from browser-visible menu, tab, or button controls that do not already expose direct navigation targets. Default: 3.</description>
+    </parameter>
+    <parameter name="same_origin_only" required="false">
+      <description>When true, only traverse pages on the same origin as the starting tab. Default: true.</description>
+    </parameter>
+    <parameter name="wait_seconds" required="false">
+      <description>How long to wait after each navigation before collecting DOM signals. Default: 0.8.</description>
+    </parameter>
+    <parameter name="max_seed_items" required="false">
+      <description>Maximum number of browser-traversal-discovered endpoints to seed into coverage and runtime inventory. Default: 60.</description>
+    </parameter>
+    <parameter name="seed_urls" required="false">
+      <description>Optional prioritized same-origin URLs or relative paths to visit before regular DOM-derived traversal candidates. Use this to force browser coverage of hidden routes mined from runtime artifacts, source maps, workflows, or synthesized hypotheses.</description>
+    </parameter>
+  </parameters>
+</tool>
