@@ -108,6 +108,100 @@ def test_synthesize_attack_hypotheses_builds_chain_from_multiple_signal_sources(
     assert ledger["assessment_summary"]["hypothesis_total"] >= 3
 
 
+def test_synthesize_attack_hypotheses_uses_source_map_and_hidden_route_hints(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        creative_actions,
+        "_safe_list_runtime_inventory",
+        lambda agent_state, target: [
+            {
+                "host": "app.test",
+                "normalized_path": "/api/account/profile",
+                "methods": ["GET"],
+                "priority": "normal",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "_safe_list_surface_artifacts",
+        lambda agent_state, target: [
+            {
+                "kind": "js_route",
+                "host": "app.test",
+                "path": "/admin/beta/users",
+            },
+            {
+                "kind": "source_map",
+                "host": "app.test",
+                "path": "/static/dashboard.js.map",
+                "source_files": ["src/admin/users.ts", "src/security/featureFlags.ts"],
+                "role_hints": ["isAdmin"],
+                "object_hints": ["tenantId", "accountId"],
+                "secret_hints": ["clientSecret"],
+                "feature_hints": ["featureFlags"],
+                "param_hints": ["callbackUrl", "filePath"],
+            },
+        ],
+    )
+    monkeypatch.setattr(creative_actions, "_safe_list_workflows", lambda agent_state, target: [])
+    monkeypatch.setattr(
+        creative_actions,
+        "list_session_profiles",
+        lambda agent_state, include_values=False, max_items=100: {
+            "success": True,
+            "profile_count": 2,
+            "profiles": [{"name": "user"}, {"name": "admin"}],
+        },
+    )
+    monkeypatch.setattr(
+        creative_actions,
+        "_safe_list_assessment_state",
+        lambda agent_state: {"coverage": [], "hypotheses": []},
+    )
+
+    state = DummyState("agent_root")
+    result = creative_actions.synthesize_attack_hypotheses(
+        agent_state=state,
+        target="web",
+        max_hypotheses=8,
+    )
+
+    assert result["success"] is True
+    hypotheses = [item["hypothesis"] for item in result["hypotheses"]]
+    vulnerability_types = {item["vulnerability_type"] for item in result["hypotheses"]}
+    assert any("/admin/beta/users" in item for item in hypotheses)
+    assert any("Source map /static/dashboard.js.map may reveal hidden privileged object flows" in item for item in hypotheses)
+    assert any("redirect or callback trust" in item for item in hypotheses)
+    assert any("file or path handling" in item for item in hypotheses)
+    assert "authorization" in vulnerability_types or "idor" in vulnerability_types
+    assert "ssrf" in vulnerability_types or "open_redirect" in vulnerability_types
+    assert "path_traversal" in vulnerability_types
+    hidden_route = next(item for item in result["hypotheses"] if "/admin/beta/users" in item["hypothesis"])
+    assert hidden_route["candidate_urls"] == ["https://app.test/admin/beta/users"]
+    assert hidden_route["focus_candidates"] == ["authz"]
+    source_map_auth = next(
+        item
+        for item in result["hypotheses"]
+        if "Source map /static/dashboard.js.map may reveal hidden privileged object flows" in item["hypothesis"]
+    )
+    assert "tenantId" in source_map_auth["parameter_names"]
+    assert "authz" in source_map_auth["focus_candidates"]
+    assert "https://app.test/admin/beta/users" in source_map_auth["candidate_urls"]
+    assert source_map_auth["needs_more_data"] is False
+    redirect_hypothesis = next(
+        item for item in result["hypotheses"] if "redirect or callback trust" in item["hypothesis"]
+    )
+    assert redirect_hypothesis["parameter_names"] == ["callbackUrl"]
+    assert redirect_hypothesis["focus_candidates"] == ["ssrf_oob"]
+    assert redirect_hypothesis["needs_more_data"] is True
+    file_hypothesis = next(item for item in result["hypotheses"] if "file or path handling" in item["hypothesis"])
+    assert file_hypothesis["parameter_names"] == ["filePath"]
+    assert file_hypothesis["focus_candidates"] == ["path_traversal"]
+    assert file_hypothesis["needs_more_data"] is True
+
+
 def test_generate_contextual_payloads_produces_oob_and_encoded_variants() -> None:
     result = creative_actions.generate_contextual_payloads(
         vulnerability_type="ssrf",

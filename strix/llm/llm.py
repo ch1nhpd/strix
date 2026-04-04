@@ -3,7 +3,9 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-import litellm
+from strix.litellm_bootstrap import import_litellm
+litellm = import_litellm()
+
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from litellm import acompletion, completion_cost, stream_chunk_builder, supports_reasoning
 from litellm.utils import supports_prompt_caching, supports_vision

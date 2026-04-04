@@ -1,12 +1,13 @@
 import logging
 from typing import Any
 
-import litellm
+from strix.litellm_bootstrap import import_litellm
 
 from strix.config.config import Config, resolve_llm_config
 
 
 logger = logging.getLogger(__name__)
+litellm = import_litellm()
 
 
 MAX_TOTAL_TOKENS = 100_000

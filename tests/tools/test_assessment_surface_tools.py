@@ -309,6 +309,18 @@ def test_build_attack_surface_review_maps_layers_and_blind_spots() -> None:
                     "source_asset": "/static/app.js",
                 },
                 {
+                    "kind": "source_map",
+                    "host": "app.test",
+                    "path": "/static/app.js.map",
+                    "method": "GET",
+                    "priority": "high",
+                    "source_files": ["src/admin/users.ts", "src/security/flags.ts"],
+                    "role_hints": ["isAdmin"],
+                    "object_hints": ["tenantId"],
+                    "secret_hints": ["clientSecret"],
+                    "feature_hints": ["featureFlags"],
+                },
+                {
                     "kind": "graphql_persisted_query",
                     "host": "app.test",
                     "path": "/graphql",
@@ -488,6 +500,7 @@ def test_build_attack_surface_review_maps_layers_and_blind_spots() -> None:
     assert "Portal" in service_entry["titles"]
     assert "app.test" in service_entry["tls_names"]
     assert any(item["kind"] == "openapi_spec" for item in report["exposure_review"])
+    assert any(item["kind"] == "source_map" for item in report["exposure_review"])
     assert any(
         item["parameter"] == "tenant_id"
         for item in report["parameter_object_review"]["parameters"]
@@ -518,6 +531,11 @@ def test_build_attack_surface_review_maps_layers_and_blind_spots() -> None:
     assert weak_guess["resolve_status"] == "needs more data"
     assert report["priorities"]["top_services_next"]
     assert report["priorities"]["top_modules_next"]
+    assert any(
+        "/static/app.js.map" in item["source_maps"]
+        for item in report["application_inventory"]
+        if item["host"] == "app.test"
+    )
     assert report["priorities"]["top_objects_next"]
     assert any(
         item["boundary"] == "tenant A/B"

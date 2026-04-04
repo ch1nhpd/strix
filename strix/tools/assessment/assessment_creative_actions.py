@@ -1,4 +1,5 @@
 import json
+import re
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import quote
@@ -28,6 +29,12 @@ ROLE_KEYWORDS = [
 OBJECT_KEYWORDS = ["id", "user", "order", "invoice", "account", "tenant", "project", "team"]
 TIMING_DELTA_MS = 1200.0
 MAX_HYPOTHESIS_SOURCE_ITEMS = 6
+REDIRECT_PARAM_MARKERS = ("callback", "next", "redirect", "return", "target", "url", "uri")
+FILE_PARAM_MARKERS = ("file", "path")
+OBJECT_PARAM_MARKERS = ("account", "id", "member", "org", "organization", "project", "team", "tenant", "user")
+ROLE_HINT_MARKERS = ("admin", "owner", "permission", "privilege", "role", "scope")
+FEATURE_HINT_MARKERS = ("beta", "debug", "feature", "flag", "internal", "preview", "toggle")
+SECRET_HINT_MARKERS = ("api", "auth", "client", "csrf", "key", "password", "secret", "session", "token")
 
 
 def _normalize_marker_list(values: list[Any] | None) -> list[str]:
@@ -57,6 +64,146 @@ def _priority_name(*values: str) -> str:
     if not candidates:
         return "normal"
     return min(candidates, key=lambda item: PRIORITY_ORDER.get(item, 2))
+
+
+def _focus_candidates_for_vulnerability_type(vulnerability_type: str) -> list[str]:
+    normalized = str(vulnerability_type or "").strip().lower()
+    mapping = {
+        "authentication": ["auth_jwt"],
+        "authorization": ["authz"],
+        "business_logic": [],
+        "idor": ["authz"],
+        "jwt": ["auth_jwt"],
+        "open_redirect": ["open_redirect"],
+        "path_traversal": ["path_traversal"],
+        "race_condition": ["workflow_race"],
+        "sqli": ["sqli"],
+        "ssrf": ["ssrf_oob"],
+        "ssti": ["ssti"],
+        "xss": ["xss"],
+        "xxe": ["xxe"],
+    }
+    return list(mapping.get(normalized, []))
+
+
+def _candidate_url(host: str, path: str) -> str | None:
+    normalized_host = str(host or "").strip()
+    normalized_path = str(path or "").strip()
+    if not normalized_host or not normalized_path:
+        return None
+    return f"https://{normalized_host}{normalized_path}"
+
+
+def _path_parameter_hints(path: str) -> list[str]:
+    hints: list[str] = []
+    for candidate in re.findall(r":([A-Za-z0-9_]+)", str(path or "")):
+        normalized = str(candidate).strip()
+        if normalized and normalized not in hints:
+            hints.append(normalized)
+    for candidate in re.findall(r"{([^}/]+)}", str(path or "")):
+        normalized = str(candidate).strip()
+        if normalized and normalized not in hints:
+            hints.append(normalized)
+    return hints
+
+
+def _runtime_entry_parameter_names(entry: dict[str, Any]) -> list[str]:
+    return _unique_strings(
+        [
+            *[str(item) for item in list(entry.get("query_params") or [])],
+            *[str(item) for item in list(entry.get("body_params") or [])],
+            *[str(item) for item in list(entry.get("path_params") or [])],
+            *[str(item) for item in list(entry.get("header_params") or [])],
+        ]
+    )
+
+
+def _runtime_candidate_urls(
+    runtime_inventory: list[dict[str, Any]],
+    *,
+    host: str,
+    parameter_names: list[str] | None = None,
+    path_keywords: list[str] | None = None,
+    max_items: int = 4,
+) -> list[str]:
+    normalized_host = str(host or "").strip().lower()
+    parameter_needles = [str(item).strip().lower() for item in (parameter_names or []) if str(item).strip()]
+    path_needles = [str(item).strip().lower() for item in (path_keywords or []) if str(item).strip()]
+    candidate_urls: list[str] = []
+
+    for entry in runtime_inventory:
+        if not isinstance(entry, dict):
+            continue
+        entry_host = str(entry.get("host") or "").strip().lower()
+        if normalized_host and entry_host and entry_host != normalized_host:
+            continue
+
+        entry_path = str(entry.get("normalized_path") or "").strip()
+        entry_path_lower = entry_path.lower()
+        entry_parameters = [item.lower() for item in _runtime_entry_parameter_names(entry)]
+        parameter_match = not parameter_needles or any(
+            any(needle in parameter or parameter in needle for needle in parameter_needles)
+            for parameter in entry_parameters
+        )
+        path_match = not path_needles or any(keyword in entry_path_lower for keyword in path_needles)
+        if parameter_needles and path_needles:
+            if not parameter_match and not path_match:
+                continue
+        elif parameter_needles:
+            if not parameter_match:
+                continue
+        elif path_needles:
+            if not path_match:
+                continue
+        elif not entry_path:
+            continue
+
+        for sample_url in list(entry.get("sample_urls") or []):
+            candidate = str(sample_url or "").strip()
+            if candidate:
+                candidate_urls.append(candidate)
+        direct_url = _candidate_url(entry.get("host") or host, entry_path)
+        if direct_url:
+            candidate_urls.append(direct_url)
+        if len(_unique_strings(candidate_urls)) >= max_items:
+            break
+
+    return _unique_strings(candidate_urls)[:max_items]
+
+
+def _surface_candidate_urls_for_host(
+    artifacts: list[dict[str, Any]],
+    *,
+    host: str,
+    max_items: int = 4,
+) -> list[str]:
+    normalized_host = str(host or "").strip().lower()
+    candidate_urls: list[str] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_host = str(artifact.get("host") or "").strip().lower()
+        if normalized_host and artifact_host and artifact_host != normalized_host:
+            continue
+        kind = str(artifact.get("kind") or "").strip().lower()
+        if kind in {"source_map", "js_asset"}:
+            continue
+        candidate = _candidate_url(str(artifact.get("host") or host), str(artifact.get("path") or ""))
+        if candidate:
+            candidate_urls.append(candidate)
+        if kind == "openapi_spec":
+            for operation in list(artifact.get("documented_operations") or []):
+                if not isinstance(operation, dict):
+                    continue
+                operation_candidate = _candidate_url(
+                    str(artifact.get("host") or host),
+                    str(operation.get("path") or ""),
+                )
+                if operation_candidate:
+                    candidate_urls.append(operation_candidate)
+        if len(_unique_strings(candidate_urls)) >= max_items:
+            break
+    return _unique_strings(candidate_urls)[:max_items]
 
 
 def _safe_list_runtime_inventory(agent_state: Any, target: str) -> list[dict[str, Any]]:
@@ -141,6 +288,58 @@ def _suspicious_object_path(path: str) -> bool:
     return ":" in lowered or any(keyword in lowered for keyword in OBJECT_KEYWORDS)
 
 
+def _marker_hits(values: list[Any] | None, markers: tuple[str, ...]) -> list[str]:
+    hits: list[str] = []
+    for value in _normalize_marker_list(values):
+        lowered = value.lower()
+        if any(marker in lowered for marker in markers):
+            hits.append(value)
+    return hits
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate or candidate.lower() in seen:
+            continue
+        seen.add(candidate.lower())
+        deduped.append(candidate)
+    return deduped
+
+
+def _artifact_hint_summary(artifact: dict[str, Any]) -> dict[str, list[str]]:
+    role_hints = _marker_hits(
+        [*list(artifact.get("role_hints") or []), *list(artifact.get("hint_names") or [])],
+        ROLE_HINT_MARKERS,
+    )
+    object_hints = _marker_hits(
+        [*list(artifact.get("object_hints") or []), *list(artifact.get("param_hints") or [])],
+        tuple(OBJECT_KEYWORDS + list(OBJECT_PARAM_MARKERS)),
+    )
+    redirect_hints = _marker_hits(list(artifact.get("param_hints") or []), REDIRECT_PARAM_MARKERS)
+    file_hints = _marker_hits(list(artifact.get("param_hints") or []), FILE_PARAM_MARKERS)
+    feature_hints = _marker_hits(
+        [*list(artifact.get("feature_hints") or []), *list(artifact.get("hint_names") or [])],
+        FEATURE_HINT_MARKERS,
+    )
+    secret_hints = _marker_hits(
+        [*list(artifact.get("secret_hints") or []), *list(artifact.get("hint_names") or [])],
+        SECRET_HINT_MARKERS,
+    )
+    source_files = _normalize_marker_list(list(artifact.get("source_files") or []))
+    return {
+        "role_hints": role_hints,
+        "object_hints": object_hints,
+        "redirect_hints": redirect_hints,
+        "file_hints": file_hints,
+        "feature_hints": feature_hints,
+        "secret_hints": secret_hints,
+        "source_files": source_files,
+    }
+
+
 def _preview_similarity(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
@@ -205,11 +404,30 @@ def _runtime_hypotheses(
                     str(item.get("priority", "normal")),
                     "critical" if state_changing else "high",
                 )
+                direct_url = _candidate_url(host, path)
+                candidate_urls = _unique_strings(
+                    [
+                        *[
+                            str(sample).strip()
+                            for sample in list(item.get("sample_urls") or [])
+                            if str(sample).strip()
+                        ],
+                        *([direct_url] if direct_url else []),
+                    ]
+                )
+                parameter_names = _unique_strings(
+                    [
+                        *_runtime_entry_parameter_names(item),
+                        *_path_parameter_hints(path),
+                    ]
+                )
                 candidates.append(
                     {
                         "hypothesis": (
                             f"Authorization may break on {method} {path} across roles or tenants on {host}"
                         ),
+                        "host": host,
+                        "path": path,
                         "component": f"runtime:{host}",
                         "vulnerability_type": vulnerability_type,
                         "priority": priority,
@@ -226,6 +444,11 @@ def _runtime_hypotheses(
                             ),
                         ],
                         "signals": [f"runtime:{host}:{method}:{path}"],
+                        "candidate_urls": candidate_urls,
+                        "parameter_names": parameter_names,
+                        "focus_candidates": _focus_candidates_for_vulnerability_type(vulnerability_type),
+                        "validation_strategy": "inventory_differential_replay",
+                        "needs_more_data": False,
                     }
                 )
     return candidates
@@ -248,6 +471,7 @@ def _surface_hypotheses(
         path = str(artifact.get("path", ""))
         if not host or not path:
             continue
+        artifact_url = _candidate_url(host, path)
 
         if kind == "openapi_spec":
             missing_ops = [
@@ -257,12 +481,16 @@ def _surface_hypotheses(
             ]
             if missing_ops:
                 operation = missing_ops[0]
+                operation_path = str(operation.get("path", "")).strip()
+                operation_url = _candidate_url(host, operation_path)
                 candidates.append(
                     {
                         "hypothesis": (
                             f"Documented but unobserved endpoint {operation['method']} {operation['path']} "
                             f"may expose hidden privileged functionality on {host}"
                         ),
+                        "host": host,
+                        "path": operation_path,
                         "component": f"spec:{host}",
                         "vulnerability_type": "authorization",
                         "priority": "high",
@@ -275,6 +503,11 @@ def _surface_hypotheses(
                             "Compare whether documentation-only routes bypass middleware, routing, or feature-flag checks",
                         ],
                         "signals": [f"openapi:{host}:{path}"],
+                        "candidate_urls": [operation_url] if operation_url else [],
+                        "parameter_names": _path_parameter_hints(operation_path),
+                        "focus_candidates": ["authz"],
+                        "validation_strategy": "documented_route_replay",
+                        "needs_more_data": operation_url is None,
                     }
                 )
 
@@ -282,6 +515,8 @@ def _surface_hypotheses(
             candidates.append(
                 {
                     "hypothesis": f"GraphQL resolvers on {path} may leak cross-user or cross-tenant data on {host}",
+                    "host": host,
+                    "path": path,
                     "component": f"surface:{host}",
                     "vulnerability_type": "authorization",
                     "priority": "high",
@@ -294,6 +529,11 @@ def _surface_hypotheses(
                         "Replay the same object or node access with alternate sessions and compare partial field exposure",
                     ],
                     "signals": [f"graphql:{host}:{path}"],
+                    "candidate_urls": [artifact_url] if artifact_url else [],
+                    "parameter_names": [],
+                    "focus_candidates": ["authz"],
+                    "validation_strategy": "graphql_role_replay",
+                    "needs_more_data": artifact_url is None,
                 }
             )
 
@@ -301,6 +541,8 @@ def _surface_hypotheses(
             candidates.append(
                 {
                     "hypothesis": f"Persisted query routing on {path} may expose resolver paths that normal traffic does not surface",
+                    "host": host,
+                    "path": path,
                     "component": f"surface:{host}",
                     "vulnerability_type": "authorization",
                     "priority": "high",
@@ -312,6 +554,11 @@ def _surface_hypotheses(
                         "Compare authorization behavior against equivalent REST or GraphQL operations",
                     ],
                     "signals": [f"persisted_query:{host}:{path}"],
+                    "candidate_urls": [artifact_url] if artifact_url else [],
+                    "parameter_names": [],
+                    "focus_candidates": ["authz"],
+                    "validation_strategy": "graphql_persisted_query_replay",
+                    "needs_more_data": artifact_url is None,
                 }
             )
 
@@ -319,6 +566,8 @@ def _surface_hypotheses(
             candidates.append(
                 {
                     "hypothesis": f"WebSocket authorization on {path} may drift from equivalent HTTP enforcement on {host}",
+                    "host": host,
+                    "path": path,
                     "component": f"surface:{host}",
                     "vulnerability_type": "authorization",
                     "priority": "high",
@@ -330,6 +579,241 @@ def _surface_hypotheses(
                         "Subscribe or publish using foreign IDs, tenant names, or guessed topic keys",
                     ],
                     "signals": [f"websocket:{host}:{path}"],
+                    "candidate_urls": [],
+                    "parameter_names": [],
+                    "focus_candidates": ["authz"],
+                    "validation_strategy": "socket_channel_replay",
+                    "needs_more_data": True,
+                }
+            )
+
+        hint_summary = _artifact_hint_summary(artifact)
+        role_hints = list(hint_summary["role_hints"])
+        object_hints = list(hint_summary["object_hints"])
+        redirect_hints = list(hint_summary["redirect_hints"])
+        file_hints = list(hint_summary["file_hints"])
+        feature_hints = list(hint_summary["feature_hints"])
+        secret_hints = list(hint_summary["secret_hints"])
+        source_files = list(hint_summary["source_files"])
+
+        if kind == "js_route":
+            hidden_or_unobserved = ("GET", path) not in runtime_paths and ("ANY", path) not in runtime_paths
+            looks_privileged = any(marker in path.lower() for marker in ["/admin", "/internal", "/billing", "/report"])
+            if hidden_or_unobserved or looks_privileged:
+                vulnerability_type = "idor" if _suspicious_object_path(path) else "authorization"
+                candidates.append(
+                    {
+                        "hypothesis": (
+                            f"Hidden route {path} may expose undocumented authorization or object access on {host}"
+                        ),
+                        "host": host,
+                        "path": path,
+                        "component": f"surface:{host}",
+                        "vulnerability_type": vulnerability_type,
+                        "priority": "critical" if looks_privileged else "high",
+                        "rationale": (
+                            f"Browser-mined route {path} was inferred from asset content and is "
+                            f"{'not yet present in runtime inventory' if hidden_or_unobserved else 'associated with a privileged-looking path'}."
+                        ),
+                        "attack_chain": [
+                            "Request the hidden route directly with guest, user, owner, and admin contexts",
+                            "Swap any object IDs, tenant markers, or role-linked parameters while keeping a valid session",
+                            "Compare whether the hidden route reaches deeper state or object visibility than the visible UI",
+                        ],
+                        "signals": [f"js_route:{host}:{path}"],
+                        "candidate_urls": [artifact_url] if artifact_url else [],
+                        "parameter_names": _path_parameter_hints(path),
+                        "focus_candidates": _focus_candidates_for_vulnerability_type(vulnerability_type),
+                        "validation_strategy": "hidden_route_direct_replay",
+                        "needs_more_data": artifact_url is None,
+                    }
+                )
+
+        if kind == "source_map":
+            if role_hints or object_hints or source_files:
+                auth_candidate_urls = _unique_strings(
+                    [
+                        *_runtime_candidate_urls(
+                            runtime_inventory,
+                            host=host,
+                            parameter_names=object_hints,
+                            path_keywords=[*role_hints[:2], *object_hints[:2]],
+                        ),
+                        *_surface_candidate_urls_for_host(artifacts, host=host),
+                    ]
+                )
+                vulnerability_type = "idor" if object_hints else "authorization"
+                candidates.append(
+                    {
+                        "hypothesis": (
+                            f"Source map {path} may reveal hidden privileged object flows that break authz on {host}"
+                        ),
+                        "host": host,
+                        "path": path,
+                        "component": f"surface:{host}",
+                        "vulnerability_type": vulnerability_type,
+                        "priority": "critical" if role_hints and object_hints else "high",
+                        "rationale": (
+                            "Source map metadata exposed "
+                            f"roles={role_hints[:3] or ['needs more data']}, "
+                            f"objects={object_hints[:3] or ['needs more data']}, "
+                            f"sources={source_files[:3] or ['needs more data']}."
+                        ),
+                        "attack_chain": [
+                            "Use the leaked route/object context to request undocumented endpoints directly",
+                            "Compare ownership, tenant isolation, and field exposure across low and high privilege sessions",
+                            "Treat leaked role or object names as pivots for BOLA, field-level auth, and hidden admin UI states",
+                        ],
+                        "signals": [
+                            f"source_map:{host}:{path}",
+                            *[f"role_hint:{item}" for item in role_hints[:3]],
+                            *[f"object_hint:{item}" for item in object_hints[:3]],
+                        ],
+                        "candidate_urls": auth_candidate_urls,
+                        "parameter_names": object_hints[:4],
+                        "focus_candidates": _focus_candidates_for_vulnerability_type(vulnerability_type),
+                        "validation_strategy": (
+                            "route_replay_with_object_swap"
+                            if auth_candidate_urls
+                            else "needs_runtime_sink_mapping"
+                        ),
+                        "needs_more_data": not auth_candidate_urls,
+                    }
+                )
+            if redirect_hints:
+                redirect_vulnerability = (
+                    "ssrf" if any("callback" in item.lower() for item in redirect_hints) else "open_redirect"
+                )
+                redirect_candidate_urls = _runtime_candidate_urls(
+                    runtime_inventory,
+                    host=host,
+                    parameter_names=redirect_hints,
+                )
+                candidates.append(
+                    {
+                        "hypothesis": (
+                            f"Source map {path} suggests redirect or callback trust on {host} that may allow SSRF or open redirect"
+                        ),
+                        "host": host,
+                        "path": path,
+                        "component": f"surface:{host}",
+                        "vulnerability_type": redirect_vulnerability,
+                        "priority": "high",
+                        "rationale": (
+                            f"Source map parameter hints exposed redirect-like names {redirect_hints[:4]}, which often map to callback or return URL trust boundaries."
+                        ),
+                        "attack_chain": [
+                            "Locate requests or forms that consume the hinted callback/redirect parameters",
+                            "Try same-origin, cross-origin, and out-of-band callback values while preserving valid workflow state",
+                            "Check whether redirects, fetches, or server-side webhooks accept attacker-controlled destinations",
+                        ],
+                        "signals": [f"source_map_redirect:{host}:{path}", *[f"param_hint:{item}" for item in redirect_hints[:4]]],
+                        "candidate_urls": redirect_candidate_urls,
+                        "parameter_names": redirect_hints[:4],
+                        "focus_candidates": _focus_candidates_for_vulnerability_type(redirect_vulnerability),
+                        "validation_strategy": (
+                            "parameter_probe_with_redirect_payloads"
+                            if redirect_candidate_urls
+                            else "needs_runtime_sink_mapping"
+                        ),
+                        "needs_more_data": not redirect_candidate_urls,
+                    }
+                )
+            if file_hints:
+                file_candidate_urls = _runtime_candidate_urls(
+                    runtime_inventory,
+                    host=host,
+                    parameter_names=file_hints,
+                )
+                candidates.append(
+                    {
+                        "hypothesis": (
+                            f"Source map {path} suggests file or path handling on {host} that may allow traversal or unauthorized file access"
+                        ),
+                        "host": host,
+                        "path": path,
+                        "component": f"surface:{host}",
+                        "vulnerability_type": "path_traversal",
+                        "priority": "high",
+                        "rationale": (
+                            f"Source map parameter hints exposed file/path-like names {file_hints[:4]}, which often indicate download, export, or import boundaries."
+                        ),
+                        "attack_chain": [
+                            "Find the hinted file/path parameters in requests, forms, or hidden endpoints",
+                            "Probe relative traversal, absolute paths, and foreign object keys under valid authenticated context",
+                            "Check whether signed URLs, export paths, or attachment fetches cross object ownership boundaries",
+                        ],
+                        "signals": [f"source_map_file:{host}:{path}", *[f"param_hint:{item}" for item in file_hints[:4]]],
+                        "candidate_urls": file_candidate_urls,
+                        "parameter_names": file_hints[:4],
+                        "focus_candidates": ["path_traversal"],
+                        "validation_strategy": (
+                            "parameter_probe_with_file_payloads"
+                            if file_candidate_urls
+                            else "needs_runtime_sink_mapping"
+                        ),
+                        "needs_more_data": not file_candidate_urls,
+                    }
+                )
+            if secret_hints or feature_hints:
+                candidates.append(
+                    {
+                        "hypothesis": (
+                            f"Source map {path} may leak feature-flag or secret-bearing client context that unlocks hidden attack surface on {host}"
+                        ),
+                        "host": host,
+                        "path": path,
+                        "component": f"surface:{host}",
+                        "vulnerability_type": "secret_exposure" if secret_hints else "business_logic",
+                        "priority": "high",
+                        "rationale": (
+                            f"Source map hints exposed features={feature_hints[:3] or ['needs more data']} "
+                            f"and secrets/config names={secret_hints[:3] or ['needs more data']}."
+                        ),
+                        "attack_chain": [
+                            "Trace where the leaked flag or secret names appear in runtime requests, JS state, or hidden routes",
+                            "Check whether toggles unlock admin, beta, internal, or cross-tenant behaviors client-side only",
+                            "Verify whether any leaked config names correspond to privilege-bearing headers, tokens, or callback endpoints",
+                        ],
+                        "signals": [
+                            f"source_map_exposure:{host}:{path}",
+                            *[f"feature_hint:{item}" for item in feature_hints[:3]],
+                            *[f"secret_hint:{item}" for item in secret_hints[:3]],
+                        ],
+                        "candidate_urls": _surface_candidate_urls_for_host(artifacts, host=host),
+                        "parameter_names": _unique_strings([*feature_hints[:3], *secret_hints[:3]]),
+                        "focus_candidates": _focus_candidates_for_vulnerability_type(
+                            "secret_exposure" if secret_hints else "business_logic"
+                        ),
+                        "validation_strategy": "feature_toggle_trace",
+                        "needs_more_data": True,
+                    }
+                )
+
+        if kind == "js_asset" and feature_hints:
+            candidates.append(
+                {
+                    "hypothesis": (
+                        f"JavaScript bundle {path} may gate hidden beta or internal flows on {host} with client-side feature checks"
+                    ),
+                    "host": host,
+                    "path": path,
+                    "component": f"surface:{host}",
+                    "vulnerability_type": "business_logic",
+                    "priority": "high",
+                    "rationale": (
+                        f"Bundle metadata exposed feature-like hints {feature_hints[:4]}, which often correspond to hidden routes or weak client-enforced controls."
+                    ),
+                    "attack_chain": [
+                        "Toggle or replay feature-linked requests with and without the expected client-side state",
+                        "Check whether hidden routes or APIs respond even when the visible UI does not expose the feature",
+                    ],
+                    "signals": [f"js_asset_feature:{host}:{path}", *[f"feature_hint:{item}" for item in feature_hints[:4]]],
+                    "candidate_urls": _surface_candidate_urls_for_host(artifacts, host=host),
+                    "parameter_names": feature_hints[:4],
+                    "focus_candidates": [],
+                    "validation_strategy": "feature_toggle_trace",
+                    "needs_more_data": True,
                 }
             )
     return candidates
@@ -355,11 +839,23 @@ def _workflow_hypotheses(workflows: list[dict[str, Any]]) -> list[dict[str, Any]
             or workflow_type in {"checkout", "payment", "wallet", "transfer", "coupon", "redeem"}
             else "business_logic"
         )
+        candidate_urls = _unique_strings(
+            [
+                candidate
+                for candidate in (
+                    _candidate_url(host, str(step.get("normalized_path") or ""))
+                    for step in sequence[:4]
+                )
+                if candidate
+            ]
+        )
         candidates.append(
             {
                 "hypothesis": (
                     f"Workflow {workflow_type} may allow replay, skipped-step progression, or race abuse on {host or 'target'}"
                 ),
+                "host": host,
+                "path": str(sequence[-1].get("normalized_path", "/")) if sequence else "/",
                 "component": component,
                 "vulnerability_type": vulnerability_type,
                 "priority": _priority_name(str(workflow.get("priority", "normal")), "high"),
@@ -369,6 +865,15 @@ def _workflow_hypotheses(workflows: list[dict[str, Any]]) -> list[dict[str, Any]
                     "Run the workflow concurrently or reuse the same token/object to probe single-use violations",
                 ],
                 "signals": [f"workflow:{host}:{workflow_type}"],
+                "candidate_urls": candidate_urls,
+                "parameter_names": [],
+                "focus_candidates": _focus_candidates_for_vulnerability_type(vulnerability_type),
+                "validation_strategy": (
+                    "workflow_race_replay"
+                    if vulnerability_type == "race_condition"
+                    else "workflow_state_transition_review"
+                ),
+                "needs_more_data": vulnerability_type != "race_condition" and not candidate_urls,
             }
         )
     return candidates

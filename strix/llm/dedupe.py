@@ -3,13 +3,14 @@ import logging
 import re
 from typing import Any
 
-import litellm
+from strix.litellm_bootstrap import import_litellm
 
 from strix.config.config import resolve_llm_config
 from strix.llm.utils import resolve_strix_model
 
 
 logger = logging.getLogger(__name__)
+litellm = import_litellm()
 
 DEDUPE_SYSTEM_PROMPT = """You are an expert vulnerability report deduplication judge.
 Your task is to determine if a candidate vulnerability report describes the SAME vulnerability

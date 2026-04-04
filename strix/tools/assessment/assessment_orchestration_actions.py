@@ -2323,7 +2323,7 @@ def spawn_attack_surface_agents(
                             "Objective:\n"
                             "- Treat successful login as the start of coverage, not the finish.\n"
                             "- If a reusable authenticated context already exists, replay it immediately; otherwise check browser/proxy state and try bootstrap_session_profile_from_browser or extract_session_profiles_from_requests before concluding needs more data.\n"
-                            "- Map the authenticated runtime with map_runtime_surface, mine_additional_attack_surface, and discover_workflows_from_requests before narrowing to single requests.\n"
+                            "- Map the authenticated runtime with map_browser_surface, traverse_browser_surface, map_runtime_surface, mine_additional_attack_surface, and discover_workflows_from_requests before narrowing to single requests.\n"
                             "- Go beyond menu clicks: trace each authenticated feature flow, hidden route, parameter set, object type, export/import path, and state-changing workflow in this module.\n"
                             "- Run depth-first authenticated follow-up with run_security_focus_pipeline for authorization plus any hinted injection or workflow classes, instead of stopping after basic browsing.\n"
                             "- Compare guest, user, other-user, admin, and tenant contexts whenever the saved sessions or proxy history make that possible.\n"
@@ -2404,7 +2404,7 @@ def spawn_attack_surface_agents(
                                 "Objective:\n"
                                 "- Do not stop at proving the session works. Use the available authenticated context or auth-heavy runtime paths to expand runtime coverage and trace deep feature paths.\n"
                                 "- If no reusable profile exists yet, check browser/proxy state once, try bootstrap_session_profile_from_browser or extract_session_profiles_from_requests, then state needs more data instead of stalling.\n"
-                                "- Refresh runtime/workflow/parameter coverage from authenticated or auth-heavy traffic, then run authz and injection follow-up where the runtime suggests it.\n"
+                                "- Refresh runtime/workflow/parameter coverage from authenticated or auth-heavy traffic with map_browser_surface, traverse_browser_surface, plus runtime/workflow mining, then run authz and injection follow-up where the runtime suggests it.\n"
                                 "- Record what was truly covered, what stayed blocked, and what still needs more data."
                             ),
                         )

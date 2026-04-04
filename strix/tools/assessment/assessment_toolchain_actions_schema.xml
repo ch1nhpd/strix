@@ -79,6 +79,9 @@
     <parameter name="url" required="false">
       <description>Optional primary URL for the focus pipeline. When omitted, the pipeline can derive candidate requests from runtime inventory, workflow traces, and saved session profiles.</description>
     </parameter>
+    <parameter name="parameter_names" required="false">
+      <description>Optional explicit parameter hints to seed focused probes when hypotheses or source maps reveal likely sink names before raw runtime traffic captures them.</description>
+    </parameter>
     <parameter name="target_path" required="false">
       <description>Optional repository or source path for whitebox sink discovery that can bias focused blackbox validation toward template, XML, upload, or file-serving sinks.</description>
     </parameter>

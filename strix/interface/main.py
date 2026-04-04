@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import litellm
 from docker.errors import DockerException
 from rich.console import Console
 from rich.panel import Panel
@@ -19,8 +18,11 @@ from rich.text import Text
 
 from strix.config import Config, apply_saved_config, save_current_config
 from strix.config.config import resolve_llm_config
-from strix.llm.utils import resolve_strix_model
+from strix.litellm_bootstrap import import_litellm
 
+litellm = import_litellm()
+
+from strix.llm.utils import resolve_strix_model
 
 apply_saved_config()
 

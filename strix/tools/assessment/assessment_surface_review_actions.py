@@ -1526,6 +1526,23 @@ def build_attack_surface_review(
                     detail="JavaScript bundle referenced a route that may be hidden from the visible UI.",
                     source="surface_mining",
                 )
+            elif kind == "source_map":
+                path_record["signal_classification"] = "exposed-info"
+                add_exposure(
+                    host=host,
+                    path=path,
+                    kind=kind,
+                    detail="Source map exposure can reveal hidden routes, object names, role hints, and debug context.",
+                    source="surface_mining",
+                )
+            elif kind == "js_asset":
+                add_exposure(
+                    host=host,
+                    path=path,
+                    kind=kind,
+                    detail="JavaScript bundle exposure has recon value because it can leak hidden routes and object model hints.",
+                    source="surface_mining",
+                )
             elif kind == "openapi_spec":
                 path_record["signal_classification"] = "confirmed"
                 add_exposure(
@@ -2250,6 +2267,11 @@ def build_attack_surface_review(
                 },
             )
             module_record["root_paths"].add(str(item["path"]))
+            if (
+                "source_map" in set(item.get("source_kinds") or [])
+                or str(item["path"]).lower().endswith(".map")
+            ):
+                module_record["source_maps"].add(str(item["path"]))
             if any(
                 keyword in str(item["path"]).lower()
                 for keyword in ["docs", "swagger", "openapi", "graphiql", "postman"]

@@ -598,6 +598,8 @@ def test_spawn_attack_surface_agents_post_auth_phase_uses_saved_sessions_and_mod
     assert result["success"] is True
     assert result["phase_plan"]["selected_phase_counts"][orchestration_actions.PHASE_POST_AUTH] == 1
     assert "Stored session profiles: ['user', 'admin']" in post_auth_call["task"]
+    assert "map_browser_surface" in post_auth_call["task"]
+    assert "traverse_browser_surface" in post_auth_call["task"]
     assert "bootstrap_session_profile_from_browser" in post_auth_call["task"]
     assert "map_runtime_surface" in post_auth_call["task"]
     assert "run_security_focus_pipeline" in post_auth_call["task"]

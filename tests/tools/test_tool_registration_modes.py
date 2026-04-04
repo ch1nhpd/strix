@@ -47,6 +47,8 @@ def test_non_sandbox_registers_agents_graph_but_not_browser_or_web_search_when_d
     assert "map_runtime_surface" in names
     assert "list_runtime_inventory" in names
     assert "bootstrap_session_profile_from_browser" in names
+    assert "map_browser_surface" in names
+    assert "traverse_browser_surface" in names
     assert "confirm_active_artifact_in_browser" in names
     assert "synthesize_attack_hypotheses" in names
     assert "generate_contextual_payloads" in names
@@ -92,6 +94,8 @@ def test_sandbox_registers_sandbox_tools_but_not_non_sandbox_tools(
     assert "map_runtime_surface" not in names
     assert "list_runtime_inventory" not in names
     assert "bootstrap_session_profile_from_browser" not in names
+    assert "map_browser_surface" not in names
+    assert "traverse_browser_surface" not in names
     assert "confirm_active_artifact_in_browser" not in names
     assert "synthesize_attack_hypotheses" not in names
     assert "generate_contextual_payloads" not in names

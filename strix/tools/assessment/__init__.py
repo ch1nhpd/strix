@@ -9,6 +9,8 @@ from .assessment_actions import (
 from .assessment_browser_actions import (
     bootstrap_session_profile_from_browser,
     confirm_active_artifact_in_browser,
+    map_browser_surface,
+    traverse_browser_surface,
 )
 from .assessment_creative_actions import (
     generate_contextual_payloads,
@@ -99,6 +101,7 @@ __all__ = [
     "list_security_tool_runs",
     "list_session_profiles",
     "map_runtime_surface",
+    "map_browser_surface",
     "mine_additional_attack_surface",
     "oob_interaction_harness",
     "payload_probe_harness",
@@ -122,4 +125,5 @@ __all__ = [
     "summarize_bootstrap_for_prompt",
     "synthesize_attack_hypotheses",
     "triage_attack_anomalies",
+    "traverse_browser_surface",
 ]
