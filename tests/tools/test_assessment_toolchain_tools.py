@@ -942,6 +942,169 @@ def test_run_post_auth_deepening_passes_synthesized_candidate_urls_to_browser_tr
     assert any(step["step"] == "synthesize_attack_hypotheses" for step in steps)
     assert focus_calls[0]["url"] == "https://app.test/admin/beta/users?tenantId=1"
     assert focus_calls[0]["targets"] == ["https://app.test"]
+    assert focus_calls[0]["parameter_names"] == ["tenantId"]
+
+
+def test_run_post_auth_deepening_selects_focus_specific_runtime_targets(
+    monkeypatch: Any,
+) -> None:
+    focus_calls: list[dict[str, Any]] = []
+    runtime_entries = [
+        {
+            "host": "app.test",
+            "normalized_path": "/api/orders/123",
+            "sample_urls": ["https://app.test/api/orders/123?id=123"],
+            "query_params": ["id"],
+            "body_params": [],
+            "methods": ["GET"],
+            "content_types": ["application/json"],
+        },
+        {
+            "host": "app.test",
+            "normalized_path": "/coupon/redeem",
+            "sample_urls": ["https://app.test/coupon/redeem"],
+            "query_params": [],
+            "body_params": ["coupon"],
+            "methods": ["POST"],
+            "content_types": ["application/json"],
+        },
+        {
+            "host": "app.test",
+            "normalized_path": "/api/webhooks",
+            "sample_urls": ["https://app.test/api/webhooks"],
+            "query_params": [],
+            "body_params": ["callback_url"],
+            "methods": ["POST"],
+            "content_types": ["application/json"],
+        },
+        {
+            "host": "app.test",
+            "normalized_path": "/search",
+            "sample_urls": ["https://app.test/search?search=report"],
+            "query_params": ["search"],
+            "body_params": [],
+            "methods": ["GET"],
+            "content_types": ["text/html"],
+        },
+        {
+            "host": "app.test",
+            "normalized_path": "/redirect",
+            "sample_urls": ["https://app.test/redirect?next=%2Fdashboard"],
+            "query_params": ["next"],
+            "body_params": [],
+            "methods": ["GET"],
+            "content_types": ["text/html"],
+        },
+        {
+            "host": "app.test",
+            "normalized_path": "/download",
+            "sample_urls": ["https://app.test/download?file=report.pdf"],
+            "query_params": ["file"],
+            "body_params": [],
+            "methods": ["GET"],
+            "content_types": ["text/html"],
+        },
+        {
+            "host": "app.test",
+            "normalized_path": "/import/xml",
+            "sample_urls": ["https://app.test/import/xml"],
+            "query_params": [],
+            "body_params": [],
+            "methods": ["POST"],
+            "content_types": ["application/xml"],
+        },
+    ]
+    workflows = [
+        {
+            "workflow_id": "wf_coupon",
+            "host": "app.test",
+            "sequence": [
+                {"path": "/coupon/redeem", "method": "POST", "request_id": "req_coupon"}
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_session_profiles",
+        lambda *args, **kwargs: [
+            {
+                "profile_id": "prof_user",
+                "name": "user",
+                "role": "user",
+                "base_url": "https://app.test",
+            }
+        ],
+    )
+    monkeypatch.setattr(toolchain_actions, "_get_focus_proxy_manager", lambda: None)
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "map_browser_surface",
+        lambda *args, **kwargs: {"success": False, "available": False, "error": "browser not launched"},
+    )
+    monkeypatch.setattr(
+        browser_assessment_actions,
+        "traverse_browser_surface",
+        lambda *args, **kwargs: {"success": False, "available": False, "error": "browser not launched"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "_load_runtime_inventory_entries",
+        lambda *args, **kwargs: list(runtime_entries),
+    )
+    monkeypatch.setattr(toolchain_actions, "_load_mined_surface_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        creative_actions,
+        "synthesize_attack_hypotheses",
+        lambda *args, **kwargs: {"success": False, "error": "no hypotheses"},
+    )
+    monkeypatch.setattr(
+        toolchain_actions,
+        "run_security_focus_pipeline",
+        lambda *args, **kwargs: (
+            focus_calls.append(kwargs)
+            or {
+                "success": True,
+                "focus": kwargs["focus"],
+                "step_count": 1,
+                "active_probe_results": [],
+            }
+        ),
+    )
+
+    state = DummyState("agent_root")
+    steps: list[dict[str, Any]] = []
+    result = toolchain_actions._run_post_auth_deepening(
+        agent_state=state,
+        logical_target="web",
+        steps=steps,
+        runtime_entries=list(runtime_entries),
+        surface_artifacts=[],
+        workflows=workflows,
+        max_active_targets=2,
+        max_hypotheses=8,
+        reuse_previous_runs=True,
+    )
+
+    assert result is not None
+    focus_by_name = {call["focus"]: call for call in focus_calls}
+    assert focus_by_name["authz"]["url"] == "https://app.test/api/orders/123?id=123"
+    assert focus_by_name["authz"]["parameter_names"] == ["id"]
+    assert focus_by_name["workflow_race"]["url"] == "https://app.test/coupon/redeem"
+    assert focus_by_name["workflow_race"]["parameter_names"] == ["coupon"]
+    assert focus_by_name["ssrf_oob"]["url"] == "https://app.test/api/webhooks"
+    assert focus_by_name["ssrf_oob"]["parameter_names"] == ["callback_url"]
+    assert focus_by_name["sqli"]["url"] == "https://app.test/search?search=report"
+    assert focus_by_name["sqli"]["parameter_names"] == ["search"]
+    assert focus_by_name["xss"]["url"] == "https://app.test/search?search=report"
+    assert focus_by_name["xss"]["parameter_names"] == ["search"]
+    assert focus_by_name["open_redirect"]["url"] == "https://app.test/redirect?next=%2Fdashboard"
+    assert focus_by_name["open_redirect"]["parameter_names"] == ["next"]
+    assert focus_by_name["path_traversal"]["url"] == "https://app.test/download?file=report.pdf"
+    assert focus_by_name["path_traversal"]["parameter_names"] == ["file"]
+    assert focus_by_name["xxe"]["url"] == "https://app.test/import/xml"
+    assert any(step["step"] == "post_auth_focus:workflow_race" for step in steps)
+    assert any(step["step"] == "post_auth_focus:xxe" for step in steps)
 
 
 def test_run_security_tool_scan_httpx_seeds_discovered_paths(monkeypatch: Any) -> None:

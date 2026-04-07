@@ -7289,6 +7289,400 @@ def _session_profile_base_urls(session_profiles: list[dict[str, Any]]) -> list[s
     return base_urls
 
 
+def _url_parameter_names(url: str) -> list[str]:
+    normalized_url = str(url).strip()
+    if not _is_http_url(normalized_url):
+        return []
+    return _normalize_parameter_names(
+        [key for key, _ in parse_qsl(urlparse(normalized_url).query, keep_blank_values=True)]
+    )
+
+
+def _focus_relevant_parameter_names(
+    focus: str,
+    parameter_names: list[str],
+    *,
+    allow_fallback: bool = False,
+) -> list[str]:
+    normalized = _normalize_parameter_names(parameter_names)
+    if not normalized:
+        return []
+
+    matched: list[str] = []
+    hints = list(FOCUS_PARAMETER_HINTS.get(focus, []))
+    for parameter_name in normalized:
+        if any(hint in parameter_name for hint in hints):
+            matched.append(parameter_name)
+
+    if focus == "authz":
+        authz_markers = (
+            "id",
+            "user",
+            "account",
+            "tenant",
+            "workspace",
+            "project",
+            "team",
+            "member",
+            "order",
+            "invoice",
+            "role",
+        )
+        for parameter_name in normalized:
+            inferred = _infer_parameter_vulnerability_type(parameter_name)
+            if inferred in {"idor", "authorization"} or any(
+                marker in parameter_name for marker in authz_markers
+            ):
+                matched.append(parameter_name)
+    elif focus == "workflow_race":
+        for parameter_name in normalized:
+            if any(
+                marker in parameter_name
+                for marker in AUTO_FOCUS_SIGNAL_KEYWORDS.get("workflow_race", [])
+            ):
+                matched.append(parameter_name)
+    elif focus == "auth_jwt":
+        for parameter_name in normalized:
+            if any(marker in parameter_name for marker in ("token", "jwt", "auth", "session")):
+                matched.append(parameter_name)
+
+    deduped = _normalize_parameter_names(matched)
+    if deduped:
+        return deduped[:4]
+    if allow_fallback and focus in {"authz", "workflow_race", "auth_jwt"}:
+        return normalized[:4]
+    return []
+
+
+def _focus_candidate_score(
+    focus: str,
+    *,
+    url: str,
+    parameter_names: list[str],
+    methods: set[str] | None = None,
+    content_types: list[str] | None = None,
+    source_text: str = "",
+    explicit: bool = False,
+) -> int:
+    normalized_url = str(url).strip()
+    if not _is_http_url(normalized_url):
+        return 0
+
+    parsed = urlparse(normalized_url)
+    path = parsed.path or "/"
+    normalized_methods = {str(method).strip().upper() for method in set(methods or set()) if str(method).strip()}
+    normalized_content_types = [
+        str(content_type).strip().lower()
+        for content_type in list(content_types or [])
+        if str(content_type).strip()
+    ]
+    combined_parameters = _normalize_parameter_names(
+        [*parameter_names, *_url_parameter_names(normalized_url)]
+    )
+    relevant_parameters = _focus_relevant_parameter_names(focus, combined_parameters)
+
+    searchable = " ".join(
+        [
+            normalized_url.lower(),
+            path.lower(),
+            str(source_text or "").strip().lower(),
+            *combined_parameters,
+            *[method.lower() for method in normalized_methods],
+            *normalized_content_types,
+        ]
+    )
+    keyword_hints = _unique_strings(
+        [
+            *list(FOCUS_PARAMETER_HINTS.get(focus, [])),
+            *list(AUTO_FOCUS_SIGNAL_KEYWORDS.get(focus, [])),
+            *list(FOCUS_SOURCE_HINTS.get(focus, [])),
+        ]
+    )
+    keyword_hits = sum(1 for keyword in keyword_hints if keyword and keyword in searchable)
+
+    score = 1
+    if explicit:
+        score += 8
+    path_priority_score = _priority_rank(_priority_for_path(path))
+    if focus in {"authz", "workflow_race", "auth_jwt"}:
+        score += path_priority_score
+        if _looks_sensitive_path(path):
+            score += 1
+    else:
+        score += min(path_priority_score, 1)
+    if parsed.query:
+        score += 1
+    if relevant_parameters:
+        score += 2 + min(len(relevant_parameters), 2)
+        if parsed.query:
+            score += 1
+    score += min(keyword_hits, 4)
+
+    if focus == "authz":
+        if _looks_sensitive_path(path):
+            score += 3
+        if any(
+            _infer_parameter_vulnerability_type(parameter_name) in {"idor", "authorization"}
+            for parameter_name in combined_parameters
+        ):
+            score += 3
+    elif focus == "workflow_race":
+        if normalized_methods.intersection(STATE_CHANGING_METHODS):
+            score += 4
+        if any(keyword in searchable for keyword in AUTO_FOCUS_SIGNAL_KEYWORDS.get("workflow_race", [])):
+            score += 2
+    elif focus == "ssrf_oob":
+        if normalized_methods.intersection(STATE_CHANGING_METHODS):
+            score += 1
+    elif focus == "xxe":
+        if any(
+            marker in content_type
+            for marker in XML_CONTENT_TYPE_MARKERS
+            for content_type in normalized_content_types
+        ):
+            score += 5
+        if _path_or_url_contains_keyword(searchable, XML_PATH_KEYWORDS):
+            score += 4
+    elif focus == "file_upload":
+        if any("multipart/form-data" in content_type for content_type in normalized_content_types):
+            score += 5
+        if _path_or_url_contains_keyword(searchable, UPLOAD_PATH_KEYWORDS):
+            score += 4
+    elif focus == "path_traversal":
+        if _path_or_url_contains_keyword(searchable, FOCUS_PARAMETER_HINTS.get("path_traversal", [])):
+            score += 4
+    elif focus == "open_redirect":
+        if _path_or_url_contains_keyword(searchable, FOCUS_PARAMETER_HINTS.get("open_redirect", [])):
+            score += 4
+    elif focus == "ssti":
+        if _path_or_url_contains_keyword(searchable, FOCUS_PARAMETER_HINTS.get("ssti", [])):
+            score += 4
+    elif focus == "sqli":
+        if _path_or_url_contains_keyword(searchable, FOCUS_PARAMETER_HINTS.get("sqli", [])):
+            score += 4
+        if any(
+            keyword in searchable
+            for keyword in ("query", "search", "filter", "sort", "report", "analytics")
+        ):
+            score += 3
+    elif focus == "xss":
+        if _path_or_url_contains_keyword(searchable, FOCUS_PARAMETER_HINTS.get("xss", [])):
+            score += 4
+    elif focus == "auth_jwt":
+        if any(marker in searchable for marker in ("jwt", "token", "bearer", "authorization", "session")):
+            score += 5
+
+    return score
+
+
+def _synthesized_focus_buckets(
+    synthesized_hypotheses: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in synthesized_hypotheses:
+        if not isinstance(item, dict):
+            continue
+        focus_candidates = [
+            str(candidate).strip()
+            for candidate in list(item.get("focus_candidates") or [])
+            if str(candidate).strip()
+        ]
+        if not focus_candidates:
+            mapped_focus = _map_vulnerability_type_to_focus(
+                str(item.get("vulnerability_type") or ""),
+                text=str(item.get("hypothesis") or ""),
+            )
+            if mapped_focus:
+                focus_candidates = [mapped_focus]
+        if not focus_candidates:
+            continue
+
+        candidate_urls = _unique_strings(
+            [str(candidate).strip() for candidate in list(item.get("candidate_urls") or []) if str(candidate).strip()]
+        )
+        parameter_names = _normalize_parameter_names(list(item.get("parameter_names") or []))
+        for focus in focus_candidates:
+            bucket = buckets.setdefault(
+                focus,
+                {
+                    "candidate_urls": [],
+                    "parameter_names": [],
+                },
+            )
+            for candidate_url in candidate_urls:
+                if candidate_url not in bucket["candidate_urls"]:
+                    bucket["candidate_urls"].append(candidate_url)
+            for parameter_name in parameter_names:
+                if parameter_name not in bucket["parameter_names"]:
+                    bucket["parameter_names"].append(parameter_name)
+    return buckets
+
+
+def _build_post_auth_focus_contexts(
+    *,
+    focus_order: list[str],
+    candidate_urls: list[str],
+    runtime_entries: list[dict[str, Any]],
+    surface_artifacts: list[dict[str, Any]],
+    synthesized_hypotheses: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    overall_candidates = _unique_strings([item for item in candidate_urls if _is_http_url(item)])
+    synthesized_buckets = _synthesized_focus_buckets(synthesized_hypotheses)
+    contexts: dict[str, dict[str, Any]] = {}
+
+    for focus in focus_order:
+        focus_candidates: dict[str, dict[str, Any]] = {}
+
+        def register_candidate(
+            *,
+            url: str,
+            parameter_names: list[str],
+            methods: set[str] | None = None,
+            content_types: list[str] | None = None,
+            source_text: str = "",
+            source: str,
+            explicit: bool = False,
+        ) -> None:
+            normalized_url = str(url).strip()
+            if not _is_http_url(normalized_url):
+                return
+            relevant_parameters = _focus_relevant_parameter_names(
+                focus,
+                [*parameter_names, *_url_parameter_names(normalized_url)],
+                allow_fallback=True,
+            )
+            score = _focus_candidate_score(
+                focus,
+                url=normalized_url,
+                parameter_names=relevant_parameters,
+                methods=methods,
+                content_types=content_types,
+                source_text=source_text,
+                explicit=explicit,
+            )
+            candidate = focus_candidates.setdefault(
+                normalized_url,
+                {
+                    "url": normalized_url,
+                    "score": score,
+                    "parameter_names": [],
+                    "sources": [],
+                },
+            )
+            if score > int(candidate.get("score") or 0):
+                candidate["score"] = score
+            merged_parameters = _normalize_parameter_names(
+                [*list(candidate.get("parameter_names") or []), *relevant_parameters]
+            )
+            candidate["parameter_names"] = merged_parameters[:4]
+            if source not in candidate["sources"]:
+                candidate["sources"].append(source)
+
+        synthesized_bucket = synthesized_buckets.get(focus) or {}
+        synthesized_parameters = _normalize_parameter_names(
+            list(synthesized_bucket.get("parameter_names") or [])
+        )
+        for explicit_url in list(synthesized_bucket.get("candidate_urls") or []):
+            register_candidate(
+                url=str(explicit_url),
+                parameter_names=synthesized_parameters,
+                source_text=str(explicit_url),
+                source="synthesized_hypothesis",
+                explicit=True,
+            )
+
+        for entry in runtime_entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_urls = _candidate_urls_from_runtime_entries([entry])
+            entry_parameters = _runtime_entry_parameter_names(entry)
+            entry_methods = {
+                str(method).strip().upper()
+                for method in list(entry.get("methods") or [])
+                if str(method).strip()
+            }
+            entry_content_types = [
+                str(content_type).strip().lower()
+                for content_type in list(entry.get("content_types") or [])
+                if str(content_type).strip()
+            ]
+            entry_text = " ".join(
+                [
+                    str(entry.get("normalized_path") or ""),
+                    " ".join(str(item) for item in list(entry.get("sample_urls") or [])),
+                    " ".join(entry_parameters),
+                    " ".join(entry_content_types),
+                ]
+            )
+            for runtime_url in entry_urls:
+                register_candidate(
+                    url=runtime_url,
+                    parameter_names=entry_parameters,
+                    methods=entry_methods,
+                    content_types=entry_content_types,
+                    source_text=entry_text,
+                    source="runtime_inventory",
+                )
+
+        for artifact in surface_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            artifact_url = str(artifact.get("url") or "").strip()
+            if not artifact_url:
+                host = str(artifact.get("host") or "").strip()
+                path = str(artifact.get("path") or "").strip()
+                if host and path:
+                    artifact_url = f"https://{host}{path}"
+            if not _is_http_url(artifact_url):
+                continue
+            artifact_text = " ".join(
+                [
+                    str(artifact.get("kind") or ""),
+                    str(artifact.get("path") or ""),
+                    str(artifact.get("title") or ""),
+                    str(artifact.get("url") or ""),
+                ]
+            )
+            register_candidate(
+                url=artifact_url,
+                parameter_names=[],
+                source_text=artifact_text,
+                source="surface_artifact",
+            )
+
+        for fallback_url in overall_candidates:
+            register_candidate(
+                url=fallback_url,
+                parameter_names=[],
+                source_text=fallback_url,
+                source="overall_candidate",
+            )
+
+        ranked_candidates = sorted(
+            focus_candidates.values(),
+            key=lambda item: (
+                -int(item.get("score") or 0),
+                -len(list(item.get("parameter_names") or [])),
+                str(item.get("url") or ""),
+            ),
+        )
+        selected = ranked_candidates[0] if ranked_candidates else None
+        primary_url = str(selected.get("url") or "").strip() if selected else None
+        contexts[focus] = {
+            "primary_url": primary_url or None,
+            "target_inputs": (
+                [_base_url(primary_url)] if primary_url and _base_url(primary_url) else None
+            ),
+            "parameter_names": _normalize_parameter_names(
+                list(selected.get("parameter_names") or []) if selected else []
+            ),
+            "candidate_url_count": len(ranked_candidates),
+            "selection_sources": list(selected.get("sources") or []) if selected else [],
+        }
+
+    return contexts
+
+
 def _post_auth_fallback_focuses(
     *,
     session_profiles: list[dict[str, Any]],
@@ -7492,15 +7886,31 @@ def _run_post_auth_deepening(
             ),
         ]
     )
+    focus_contexts = _build_post_auth_focus_contexts(
+        focus_order=focus_order,
+        candidate_urls=candidate_urls,
+        runtime_entries=runtime_entries,
+        surface_artifacts=surface_artifacts,
+        synthesized_hypotheses=synthesized_hypotheses,
+    )
 
     focus_results: list[dict[str, Any]] = []
     for focus in focus_order:
+        focus_context = dict(focus_contexts.get(focus) or {})
+        focus_primary_url = str(focus_context.get("primary_url") or "").strip() or primary_url
+        focus_target_inputs = focus_context.get("target_inputs")
+        if not focus_target_inputs and focus_primary_url and _base_url(focus_primary_url):
+            focus_target_inputs = [_base_url(focus_primary_url)]
+        focus_parameter_names = _normalize_parameter_names(
+            list(focus_context.get("parameter_names") or [])
+        )
         focus_result = run_security_focus_pipeline(
             agent_state=agent_state,
             target=logical_target,
             focus=focus,
-            targets=target_inputs,
-            url=primary_url,
+            targets=focus_target_inputs or target_inputs,
+            url=focus_primary_url,
+            parameter_names=focus_parameter_names or None,
             max_active_targets=max(2, min(max_active_targets + 1, 4)),
             max_hypotheses=max(max_hypotheses, 8),
             reuse_previous_runs=reuse_previous_runs,
@@ -7516,13 +7926,19 @@ def _run_post_auth_deepening(
             result=focus_result,
             metadata={
                 "source": "post_auth_deepening",
-                "primary_url": primary_url,
+                "primary_url": focus_primary_url,
                 "candidate_url_count": len(candidate_urls),
+                "focus_candidate_url_count": int(focus_context.get("candidate_url_count") or 0),
+                "parameter_names": focus_parameter_names,
+                "selection_sources": list(focus_context.get("selection_sources") or []),
             },
         )
         focus_results.append(
             {
                 "focus": focus,
+                "primary_url": focus_primary_url,
+                "parameter_names": focus_parameter_names,
+                "selection_sources": list(focus_context.get("selection_sources") or []),
                 "success": bool(focus_result.get("success")),
                 "step_count": int(focus_result.get("step_count") or 0)
                 if isinstance(focus_result, dict)
