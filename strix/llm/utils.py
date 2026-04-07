@@ -44,14 +44,19 @@ STRIX_MODEL_MAP: dict[str, str] = {
 }
 
 
-def resolve_strix_model(model_name: str | None) -> tuple[str | None, str | None]:
+def resolve_strix_model(
+    model_name: str | None,
+    *,
+    api_base: str | None = None,
+) -> tuple[str | None, str | None]:
     """Resolve a strix/ model into names for API calls and capability lookups.
 
     Returns (api_model, canonical_model):
     - api_model: openai/<base> for API calls (Strix API is OpenAI-compatible)
     - canonical_model: actual provider model name for litellm capability lookups
     Provider-less shorthand models that appear in STRIX_MODEL_MAP are normalized
-    to their provider-qualified LiteLLM names for both values.
+    to provider-qualified names unless an explicit custom api_base is set, in which
+    case the request model is preserved and only the canonical lookup model is mapped.
     Other non-strix models return the same name for both.
     """
     if not model_name:
@@ -63,7 +68,8 @@ def resolve_strix_model(model_name: str | None) -> tuple[str | None, str | None]
 
     direct_mapping = STRIX_MODEL_MAP.get(normalized_model)
     if direct_mapping:
-        return direct_mapping, direct_mapping
+        request_model = normalized_model if str(api_base or "").strip() else direct_mapping
+        return request_model, direct_mapping
 
     if not normalized_model.startswith("strix/"):
         return normalized_model, normalized_model
@@ -72,6 +78,150 @@ def resolve_strix_model(model_name: str | None) -> tuple[str | None, str | None]
     api_model = f"openai/{base_model}"
     canonical_model = STRIX_MODEL_MAP.get(base_model, api_model)
     return api_model, canonical_model
+
+
+def _stringify_litellm_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            text = _stringify_litellm_content(item)
+            if text.strip():
+                parts.append(text)
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        item_type = str(content.get("type") or "").strip().lower()
+        if item_type in {"text", "output_text"}:
+            text_value = content.get("text")
+            if isinstance(text_value, dict):
+                text_value = text_value.get("value")
+            return _stringify_litellm_content(text_value)
+        for field in ("text", "value", "content", "output_text"):
+            if field in content:
+                text = _stringify_litellm_content(content.get(field))
+                if text.strip():
+                    return text
+        return ""
+
+    for field in ("text", "value", "content"):
+        if hasattr(content, field):
+            text = _stringify_litellm_content(getattr(content, field))
+            if text.strip():
+                return text
+    return str(content)
+
+
+def extract_litellm_response_text(response: Any) -> str:
+    if response is None:
+        return ""
+
+    choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+    if not choices:
+        return ""
+
+    first_choice = choices[0] if isinstance(choices, list) and choices else None
+    if first_choice is None:
+        return ""
+
+    message = (
+        first_choice.get("message")
+        if isinstance(first_choice, dict)
+        else getattr(first_choice, "message", None)
+    )
+    if message is None:
+        return ""
+
+    if isinstance(message, dict):
+        for field in ("content", "reasoning_content"):
+            text = _stringify_litellm_content(message.get(field))
+            if text.strip():
+                return text.strip()
+    else:
+        for field in ("content", "reasoning_content"):
+            text = _stringify_litellm_content(getattr(message, field, None))
+            if text.strip():
+                return text.strip()
+
+    return ""
+
+
+def extract_litellm_stream_chunk_text(chunk: Any) -> str:
+    if chunk is None:
+        return ""
+
+    choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+    if not choices:
+        return ""
+
+    first_choice = choices[0] if isinstance(choices, list) and choices else None
+    if first_choice is None:
+        return ""
+
+    delta = (
+        first_choice.get("delta")
+        if isinstance(first_choice, dict)
+        else getattr(first_choice, "delta", None)
+    )
+    if delta is None:
+        return ""
+
+    if isinstance(delta, dict):
+        for field in ("content", "reasoning_content", "text"):
+            text = _stringify_litellm_content(delta.get(field))
+            if text.strip():
+                return text
+    else:
+        for field in ("content", "reasoning_content", "text"):
+            text = _stringify_litellm_content(getattr(delta, field, None))
+            if text.strip():
+                return text
+
+    return ""
+
+
+def describe_litellm_response_shape(response: Any) -> str:
+    if response is None:
+        return "response=None"
+
+    response_type = type(response).__name__
+    choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+    if not choices:
+        return f"type={response_type}, choices=missing-or-empty"
+
+    first_choice = choices[0] if isinstance(choices, list) and choices else None
+    if first_choice is None:
+        return f"type={response_type}, choices=empty"
+
+    message = (
+        first_choice.get("message")
+        if isinstance(first_choice, dict)
+        else getattr(first_choice, "message", None)
+    )
+    if message is None:
+        finish_reason = (
+            first_choice.get("finish_reason")
+            if isinstance(first_choice, dict)
+            else getattr(first_choice, "finish_reason", None)
+        )
+        return f"type={response_type}, message=missing, finish_reason={finish_reason}"
+
+    if isinstance(message, dict):
+        content = message.get("content")
+        reasoning_content = message.get("reasoning_content")
+    else:
+        content = getattr(message, "content", None)
+        reasoning_content = getattr(message, "reasoning_content", None)
+
+    return (
+        f"type={response_type}, "
+        f"content_type={type(content).__name__}, "
+        f"content_present={bool(_stringify_litellm_content(content).strip())}, "
+        f"reasoning_type={type(reasoning_content).__name__}, "
+        f"reasoning_present={bool(_stringify_litellm_content(reasoning_content).strip())}"
+    )
 
 
 def _truncate_to_first_function(content: str) -> str:

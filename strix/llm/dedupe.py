@@ -6,7 +6,7 @@ from typing import Any
 from strix.litellm_bootstrap import import_litellm
 
 from strix.config.config import resolve_llm_config
-from strix.llm.utils import resolve_strix_model
+from strix.llm.utils import extract_litellm_response_text, resolve_strix_model
 
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,7 @@ def check_duplicate(
         comparison_data = {"candidate": candidate_cleaned, "existing_reports": existing_cleaned}
 
         model_name, api_key, api_base = resolve_llm_config()
-        litellm_model, _ = resolve_strix_model(model_name)
+        litellm_model, _ = resolve_strix_model(model_name, api_base=api_base)
         litellm_model = litellm_model or model_name
 
         messages = [
@@ -185,7 +185,7 @@ def check_duplicate(
 
         response = litellm.completion(**completion_kwargs)
 
-        content = response.choices[0].message.content
+        content = extract_litellm_response_text(response)
         if not content:
             return {
                 "is_duplicate": False,

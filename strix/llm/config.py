@@ -27,7 +27,7 @@ class LLMConfig:
         if not self.model_name:
             raise ValueError("STRIX_LLM environment variable must be set and not empty")
 
-        api_model, canonical = resolve_strix_model(self.model_name)
+        api_model, canonical = resolve_strix_model(self.model_name, api_base=self.api_base)
         self.litellm_model: str = api_model or self.model_name
         self.canonical_model: str = canonical or self.model_name
 

@@ -22,7 +22,7 @@ from strix.litellm_bootstrap import import_litellm
 
 litellm = import_litellm()
 
-from strix.llm.utils import resolve_strix_model
+from strix.llm.utils import extract_litellm_stream_chunk_text, resolve_strix_model
 
 apply_saved_config()
 
@@ -209,7 +209,7 @@ async def warm_up_llm() -> None:
 
     try:
         model_name, api_key, api_base = resolve_llm_config()
-        litellm_model, _ = resolve_strix_model(model_name)
+        litellm_model, _ = resolve_strix_model(model_name, api_base=api_base)
         litellm_model = litellm_model or model_name
 
         test_messages = [
@@ -229,9 +229,19 @@ async def warm_up_llm() -> None:
         if api_base:
             completion_kwargs["api_base"] = api_base
 
-        response = litellm.completion(**completion_kwargs)
-
-        validate_llm_response(response)
+        stream_response = await litellm.acompletion(
+            **completion_kwargs,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        streamed_text_parts: list[str] = []
+        async for chunk in stream_response:
+            delta = extract_litellm_stream_chunk_text(chunk)
+            if delta:
+                streamed_text_parts.append(delta)
+        if not "".join(streamed_text_parts).strip():
+            response = litellm.completion(**completion_kwargs)
+            validate_llm_response(response)
 
     except Exception as e:  # noqa: BLE001
         error_text = Text()

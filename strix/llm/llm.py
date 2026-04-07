@@ -15,6 +15,7 @@ from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
 from strix.llm.utils import (
     _truncate_to_first_function,
+    extract_litellm_stream_chunk_text,
     fix_incomplete_tool_call,
     normalize_tool_format,
     parse_tool_invocations,
@@ -263,9 +264,7 @@ class LLM:
         return args
 
     def _get_chunk_content(self, chunk: Any) -> str:
-        if chunk.choices and hasattr(chunk.choices[0], "delta"):
-            return getattr(chunk.choices[0].delta, "content", "") or ""
-        return ""
+        return extract_litellm_stream_chunk_text(chunk)
 
     def _extract_thinking(self, chunks: list[Any]) -> list[dict[str, Any]] | None:
         if not chunks or not self._supports_reasoning():

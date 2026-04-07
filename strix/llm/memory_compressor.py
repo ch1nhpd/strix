@@ -4,6 +4,7 @@ from typing import Any
 from strix.litellm_bootstrap import import_litellm
 
 from strix.config.config import Config, resolve_llm_config
+from strix.llm.utils import extract_litellm_response_text
 
 
 logger = logging.getLogger(__name__)
@@ -119,7 +120,7 @@ def _summarize_messages(
             completion_args["api_base"] = api_base
 
         response = litellm.completion(**completion_args)
-        summary = response.choices[0].message.content or ""
+        summary = extract_litellm_response_text(response)
         if not summary.strip():
             return messages[0]
         summary_msg = "<context_summary message_count='{count}'>{text}</context_summary>"
