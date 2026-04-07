@@ -258,6 +258,8 @@ class LLM:
             args["api_key"] = self.config.api_key
         if self.config.api_base:
             args["api_base"] = self.config.api_base
+        if self.config.custom_llm_provider:
+            args["custom_llm_provider"] = self.config.custom_llm_provider
         if self._supports_reasoning():
             args["reasoning_effort"] = self._reasoning_effort
 

@@ -4,7 +4,7 @@ from typing import Any
 from strix.litellm_bootstrap import import_litellm
 
 from strix.config.config import Config, resolve_llm_config
-from strix.llm.utils import extract_litellm_response_text
+from strix.llm.utils import extract_litellm_response_text, resolve_litellm_request
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,7 @@ def _summarize_messages(
     prompt = SUMMARY_PROMPT_TEMPLATE.format(conversation=conversation)
 
     _, api_key, api_base = resolve_llm_config()
+    _, _, custom_provider = resolve_litellm_request(model, api_base=api_base)
 
     try:
         completion_args: dict[str, Any] = {
@@ -118,6 +119,8 @@ def _summarize_messages(
             completion_args["api_key"] = api_key
         if api_base:
             completion_args["api_base"] = api_base
+        if custom_provider:
+            completion_args["custom_llm_provider"] = custom_provider
 
         response = litellm.completion(**completion_args)
         summary = extract_litellm_response_text(response)

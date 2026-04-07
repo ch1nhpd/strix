@@ -2,7 +2,7 @@ from typing import Any
 
 from strix.config import Config
 from strix.config.config import resolve_llm_config
-from strix.llm.utils import resolve_strix_model
+from strix.llm.utils import resolve_litellm_request
 
 
 VALID_ASSESSMENT_OBJECTIVES = ["discovery", "remediation"]
@@ -27,9 +27,13 @@ class LLMConfig:
         if not self.model_name:
             raise ValueError("STRIX_LLM environment variable must be set and not empty")
 
-        api_model, canonical = resolve_strix_model(self.model_name, api_base=self.api_base)
+        api_model, canonical, custom_provider = resolve_litellm_request(
+            self.model_name,
+            api_base=self.api_base,
+        )
         self.litellm_model: str = api_model or self.model_name
         self.canonical_model: str = canonical or self.model_name
+        self.custom_llm_provider: str | None = custom_provider
 
         self.enable_prompt_caching = enable_prompt_caching
         self.skills = skills or []

@@ -80,6 +80,35 @@ def resolve_strix_model(
     return api_model, canonical_model
 
 
+def resolve_litellm_custom_provider(
+    model_name: str | None,
+    *,
+    api_base: str | None = None,
+) -> str | None:
+    """Tell LiteLLM how to transport providerless models over a custom API base.
+
+    Some OpenAI-compatible gateways expect raw model ids like `gpt-5.4`, but LiteLLM
+    still needs an explicit provider hint to avoid rejecting the request before it is sent.
+    """
+    normalized_model = str(model_name or "").strip()
+    if not normalized_model or not str(api_base or "").strip():
+        return None
+    if "/" in normalized_model:
+        return None
+    return "openai"
+
+
+def resolve_litellm_request(
+    model_name: str | None,
+    *,
+    api_base: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    api_model, canonical_model = resolve_strix_model(model_name, api_base=api_base)
+    request_model = api_model or model_name
+    custom_provider = resolve_litellm_custom_provider(request_model, api_base=api_base)
+    return request_model, canonical_model, custom_provider
+
+
 def _stringify_litellm_content(content: Any) -> str:
     if content is None:
         return ""
